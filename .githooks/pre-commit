@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+go mod tidy -diff
+
+files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
+[ -n "$files" ] || exit 0
+pkgs=$(echo "$files" | xargs -n1 dirname | sort -u | sed 's|^|./|')
+
+unformatted=$(gofmt -l $files)
+if [ -n "$unformatted" ]; then
+	echo "gofmt: $unformatted" >&2
+	exit 1
+fi
+
+# The healer is Linux-only, so vet and lint it as CI sees it as well.
+go vet $pkgs
+GOOS=linux go vet $pkgs
+GOOS=linux go vet -tags mounttest $pkgs
+go test -race $pkgs
+
+if command -v golangci-lint >/dev/null; then
+	GOOS=linux golangci-lint run $pkgs
+fi

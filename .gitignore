@@ -1,0 +1,9 @@
+/bin
+/dist
+.*
+!.gitignore
+!.githooks
+!.github
+!.dockerignore
+!.vscode/
+!.golangci.yml
