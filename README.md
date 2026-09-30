@@ -123,6 +123,26 @@ whatever it holds on the dead mount.
 With `-tiers=` empty, dead mounts are only reported, as `DeadMount` events and
 in the log.
 
+### Outcomes
+
+With the default settings, a mount that dies is healed at its third failed
+check in a row, 2 to 3 minutes later. Until then, a guarded mount that is
+missing fails every write with `EPERM`.
+
+| When | What happens | Events |
+|---|---|---|
+| A check fails fewer than `-strikes` times in a row | nothing, a passing check resets the count | none, only log lines |
+| No process of a container holds the dead mount | `live`: the new mount is swapped in, the container keeps running | `DeadMount`, `Remounted` (driver), `Remounted` |
+| Processes hold the dead mount, and release it within `-live-timeout` | `live`: swapped, the container keeps running | `DeadMount`, `Remounted` (driver), `Remounted` (Warning, with the deadline), `Remounted` once released |
+| Processes still hold the dead mount after `-live-timeout` | the container is restarted, with `restartPolicy: Always`; else the pod is deleted, if a controller recreates it; else nothing more | as above, then `Escalating`, and `DeletingPod` or `NotHealed` |
+| The same, with `-live-timeout=0` | the container keeps running with the new mount; what it holds on the dead one stays broken | as above, without the escalation |
+| A container cannot be swapped (`subPathExpr`, a mount below the mount path, a failed swap) | the container is restarted, or the pod deleted, as above | `DeadMount`, `Remounted` (driver), `Escalating`, then as above |
+| The driver cannot remount, e.g. it is down | `live` and `restart` fail, the pod is deleted if a controller recreates it; its new pod waits in `ContainerCreating` until the driver is back | `DeadMount`, `DeletingPod` or `NotHealed` |
+| The pod has no controller and no other tier heals it | nothing, the pod stays as it is | `DeadMount`, `NotHealed` |
+| The pod is stuck terminating on a dead mount | the pod is force deleted | `DeadMount`, `DeletingPod` |
+| The pod or container is gone before `-live-timeout` | nothing | none further |
+| `-tiers=` is empty | nothing; the count starts over, so this repeats every `-strikes` checks while the mount stays dead | `DeadMount`, `NotHealed` |
+
 ## Configuration
 
 | Flag | Environment | Default | |
