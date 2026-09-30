@@ -24,6 +24,8 @@ func TestSwapTimeout(t *testing.T) {
 		handles int
 		err     error
 		podGone bool
+		// noTimeout sets LiveTimeout to 0.
+		noTimeout bool
 		// events are the types and reasons recorded, in order.
 		events  []string
 		deleted bool
@@ -32,6 +34,7 @@ func TestSwapTimeout(t *testing.T) {
 		{name: "held", handles: 2, events: []string{"Warning Remounted"}},
 		{name: "count failed", err: errCount, events: []string{"Warning Remounted"}},
 		{name: "container gone", err: errGone},
+		{name: "held without a timeout", handles: 2, noTimeout: true, events: []string{"Warning Remounted"}},
 		{name: "released in time", expired: true, events: []string{"Normal Remounted"}},
 		{name: "held too long", expired: true, handles: 2,
 			events: []string{"Warning Escalating", "Warning DeletingPod"}, deleted: true},
@@ -58,6 +61,9 @@ func TestSwapTimeout(t *testing.T) {
 				stale: func(*swap) (int, []string, error) {
 					return tt.handles, []string{"app[42]"}, tt.err
 				},
+			}
+			if tt.noTimeout {
+				h.cfg.LiveTimeout = 0
 			}
 			// The restart tier is disabled, so the escalation needs no CRI.
 			if err := h.cfg.Tiers.Set("live,delete"); err != nil {

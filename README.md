@@ -110,7 +110,8 @@ The live tier works per container: a container it cannot swap goes on to the
 next tier right away, and so does one whose processes still hold handles on the
 dead mount `-live-timeout` after the swap, with an `Escalating` event. Other
 containers of the pod keep their swap. A pod or container gone before then is
-left alone.
+left alone. With `-live-timeout=0`, a swapped container is never escalated,
+whatever it holds on the dead mount.
 
 | Tier | What happens | What the pod keeps | Skipped when |
 |---|---|---|---|
@@ -131,7 +132,7 @@ in the log.
 | `-strikes` | `STRIKES` | `3` | failed checks in a row before a mount is healed |
 | `-stat-timeout` | `STAT_TIMEOUT` | `30s` | how long a `stat` may take before the mount counts as hung |
 | `-tiers` | `TIERS` | `live,restart,delete` | [heal tiers](#heal-tiers) to use; empty only reports |
-| `-live-timeout` | `LIVE_TIMEOUT` | `5m` | how long a container swapped by the live tier may hold handles on the dead mount before it goes to the next tier |
+| `-live-timeout` | `LIVE_TIMEOUT` | `5m` | how long a container swapped by the live tier may hold handles on the dead mount before it goes to the next tier; `0` disables the escalation |
 | `-guard` | `GUARD` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
 | `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | container runtime socket |
