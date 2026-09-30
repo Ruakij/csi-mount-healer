@@ -2,6 +2,7 @@ package healer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -13,24 +14,31 @@ import (
 	"k8s.io/client-go/tools/record"
 )
 
-func TestCheckSwap(t *testing.T) {
+func TestSwapTimeout(t *testing.T) {
+	errCount := errors.New("no /proc")
 	tests := []struct {
-		name    string
+		name string
+		// expired runs the check at the end of the live timeout instead of right
+		// after the swap.
+		expired bool
 		handles int
 		err     error
-		age     time.Duration
 		podGone bool
-		// events are the reasons recorded, in order.
+		// events are the types and reasons recorded, in order.
 		events  []string
-		kept    bool
 		deleted bool
 	}{
-		{name: "nothing held", events: []string{"Remounted"}},
-		{name: "held", handles: 2, age: time.Minute, events: []string{"StaleHandles"}, kept: true},
-		{name: "held too long", handles: 2, age: 5 * time.Minute,
-			events: []string{"StaleHandles", "Escalating", "DeletingPod"}, deleted: true},
+		{name: "nothing held", events: []string{"Normal Remounted"}},
+		{name: "held", handles: 2, events: []string{"Warning Remounted"}},
+		{name: "count failed", err: errCount, events: []string{"Warning Remounted"}},
 		{name: "container gone", err: errGone},
-		{name: "pod gone", handles: 2, age: time.Hour, podGone: true},
+		{name: "released in time", expired: true, events: []string{"Normal Remounted"}},
+		{name: "held too long", expired: true, handles: 2,
+			events: []string{"Warning Escalating", "Warning DeletingPod"}, deleted: true},
+		{name: "count failed at the timeout", expired: true, err: errCount,
+			events: []string{"Warning Escalating", "Warning DeletingPod"}, deleted: true},
+		{name: "container gone at the timeout", expired: true, err: errGone},
+		{name: "pod gone at the timeout", expired: true, handles: 2, podGone: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -43,10 +51,10 @@ func TestCheckSwap(t *testing.T) {
 			client := fake.NewClientset(pod)
 			events := record.NewFakeRecorder(10)
 			h := &Healer{
-				cfg:    Config{LiveTimeout: 5 * time.Minute, KubeClient: client},
+				// Long enough that no timer fires during the test.
+				cfg:    Config{LiveTimeout: time.Hour, KubeClient: client},
 				pods:   pods,
 				events: events,
-				swaps:  map[string]*swap{},
 				stale: func(*swap) (int, []string, error) {
 					return tt.handles, []string{"app[42]"}, tt.err
 				},
@@ -55,17 +63,18 @@ func TestCheckSwap(t *testing.T) {
 			if err := h.cfg.Tiers.Set("live,delete"); err != nil {
 				t.Fatal(err)
 			}
-			h.swaps["k"] = &swap{pod: pod.UID, container: "app", volumes: []string{"data"}, since: time.Now().Add(-tt.age)}
+			s := &swap{pod: pod.UID, container: "app", volumes: []string{"data"}}
 
-			h.checkSwaps(context.Background())
-
-			if _, kept := h.swaps["k"]; kept != tt.kept {
-				t.Errorf("swap kept = %v, want %v", kept, tt.kept)
+			if tt.expired {
+				h.expireSwap(context.Background(), s)
+			} else {
+				h.checkSwap(context.Background(), pod, s)
 			}
+
 			close(events.Events)
 			var got []string
 			for e := range events.Events {
-				got = append(got, strings.Fields(e)[1])
+				got = append(got, strings.Join(strings.Fields(e)[:2], " "))
 			}
 			if strings.Join(got, ",") != strings.Join(tt.events, ",") {
 				t.Errorf("events %v, want %v", got, tt.events)
