@@ -95,7 +95,6 @@ on its node:
 | `-stat-timeout` | `STAT_TIMEOUT` | `30s` | how long a `stat` may take before the mount counts as hung |
 | `-remount` | `REMOUNT` | `true` | remount before falling back to deleting the pod |
 | `-guard` | `GUARD` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
-| `-guard-interval` | `GUARD_INTERVAL` | `30s` | how soon new pods get guarded (`-guard=always`) |
 | `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | container runtime socket |
 
@@ -134,7 +133,8 @@ e.g. `-v=2`, which have no environment variables.
    again on the new mount.
 6. The guard sets `FS_IMMUTABLE_FL` on the directory underneath the mount,
    reached through a non-recursive `open_tree` clone of the parent, which shows
-   the directory without what is mounted on it and never touches a hung mount.
+   the directory without what is mounted on it and never touches a hung mount. A
+   pod is guarded as soon as a pod watch sees its first container start.
    kubelet cannot remove an immutable directory when the pod stops, so the flag
    is cleared as soon as a pod watch sees the pod terminate, and for every mount
    when the healer shuts down.

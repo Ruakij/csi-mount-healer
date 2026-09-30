@@ -52,10 +52,9 @@ type Config struct {
 	StatTimeout time.Duration
 	// Remount asks the CSI driver to mount a dead volume again. Without it, or when
 	// that fails, the pod is deleted.
-	Remount       bool
-	Guard         GuardMode
-	GuardInterval time.Duration
-	CRIEndpoint   string
+	Remount     bool
+	Guard       GuardMode
+	CRIEndpoint string
 	// Selector picks the volumes to check, heal and guard. It matches the labels
 	// of the pod plus namespace and driver, which override pod labels of the same
 	// name. Nil or empty picks every volume.
@@ -107,12 +106,13 @@ func (h *Healer) Run(ctx context.Context) error {
 	}}); err != nil {
 		return err
 	}
-	// kubelet cannot remove an immutable mount directory, and the pod object stays
-	// until it has, so the guard is released as soon as a pod stops.
+	// A pod is guarded as soon as its first container starts.
+	// kubelet cannot remove an immutable mount directory, and the pod object
+	// stays until it has, so the guard is released as soon as a pod stops.
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		UpdateFunc: func(_, obj any) {
-			if pod := obj.(*corev1.Pod); !active(pod) {
-				h.release(pod.UID)
+		UpdateFunc: func(old, obj any) {
+			if pod := obj.(*corev1.Pod); !active(pod) || started(pod) != started(old.(*corev1.Pod)) {
+				h.sweep(string(pod.UID))
 			}
 		},
 		DeleteFunc: func(obj any) {
@@ -120,7 +120,7 @@ func (h *Healer) Run(ctx context.Context) error {
 				obj = tomb.Obj
 			}
 			if pod, ok := obj.(*corev1.Pod); ok {
-				h.release(pod.UID)
+				h.sweep(string(pod.UID))
 			}
 		},
 	}); err != nil {
@@ -142,14 +142,15 @@ func (h *Healer) Run(ctx context.Context) error {
 		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Remount, h.cfg.Guard, h.cfg.Selector)
 
 	// Also clears what a previous run in another mode left behind.
-	h.sweep()
+	h.sweep("*")
 
-	var wg sync.WaitGroup
-	if h.cfg.Guard == GuardAlways {
-		wg.Go(func() { every(ctx, h.cfg.GuardInterval, h.sweep) })
-	}
-	every(ctx, h.cfg.Interval, func() { h.scan(ctx) })
-	wg.Wait()
+	every(ctx, h.cfg.Interval, func() {
+		// Retries guards that failed to set on a pod update.
+		if h.cfg.Guard == GuardAlways {
+			h.sweep("*")
+		}
+		h.scan(ctx)
+	})
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -226,26 +227,17 @@ func (h *Healer) selected(pod *corev1.Pod, v volume) bool {
 	return h.cfg.Selector.Matches(set)
 }
 
-// sweep guards the mounts of running pods and releases every other one. Each step
-// is idempotent, so it simply converges on what the pods look like right now.
-func (h *Healer) sweep() {
+// sweep guards the mounts of running pods and releases every other one, for the
+// pod with the given UID or every pod for "*". Each step is idempotent, so it
+// simply converges on what the pods look like right now.
+func (h *Healer) sweep(podUID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, v := range h.volumes("*") {
+	for _, v := range h.volumes(podUID) {
 		pod := h.pod(v.podUID)
 		guard := h.cfg.Guard == GuardAlways && pod != nil && h.selected(pod, v) && active(pod) && started(pod)
 		if err := setImmutable(v.target, guard); err != nil {
 			klog.Warningf("setting guard on %s to %v: %v", v.target, guard, err)
-		}
-	}
-}
-
-func (h *Healer) release(uid types.UID) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, v := range h.volumes(string(uid)) {
-		if err := setImmutable(v.target, false); err != nil {
-			klog.Warningf("releasing guard on %s: %v", v.target, err)
 		}
 	}
 }

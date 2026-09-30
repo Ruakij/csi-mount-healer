@@ -38,7 +38,6 @@ func main() {
 	flag.DurationVar(&cfg.StatTimeout, "stat-timeout", 30*time.Second, "how long a stat may take before the mount counts as hung")
 	flag.BoolVar(&cfg.Remount, "remount", true, "remount a dead volume through its CSI driver before falling back to deleting the pod")
 	flag.StringVar(&guard, "guard", string(healer.GuardAlways), "make the directory underneath a mount immutable: always | remount | off")
-	flag.DurationVar(&cfg.GuardInterval, "guard-interval", 30*time.Second, "time between two passes guarding the mounts of new pods (guard=always)")
 	flag.StringVar(&selector, "selector", "", "label selector over the pod labels plus namespace and driver, picking the volumes to check, heal and guard; empty picks all")
 	flag.StringVar(&cfg.CRIEndpoint, "cri-endpoint", "unix:///run/containerd/containerd.sock", "container runtime socket, used to restart containers after a remount")
 
