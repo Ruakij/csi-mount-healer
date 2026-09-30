@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -54,7 +56,11 @@ type Config struct {
 	Guard         GuardMode
 	GuardInterval time.Duration
 	CRIEndpoint   string
-	KubeClient    kubernetes.Interface
+	// Selector picks the volumes to check, heal and guard. It matches the labels
+	// of the pod plus namespace and driver, which override pod labels of the same
+	// name. Nil or empty picks every volume.
+	Selector   labels.Selector
+	KubeClient kubernetes.Interface
 }
 
 const uidIndex = "uid"
@@ -81,6 +87,9 @@ func New(cfg Config) (*Healer, error) {
 	}
 	if cfg.Strikes < 1 {
 		return nil, errors.New("strikes must be at least 1")
+	}
+	if cfg.Selector == nil {
+		cfg.Selector = labels.Everything()
 	}
 	return &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]int{}}, nil
 }
@@ -129,8 +138,8 @@ func (h *Healer) Run(ctx context.Context) error {
 	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 		return ctx.Err()
 	}
-	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, remount %v, guard %s",
-		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Remount, h.cfg.Guard)
+	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, remount %v, guard %s, selector %q",
+		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Remount, h.cfg.Guard, h.cfg.Selector)
 
 	// Also clears what a previous run in another mode left behind.
 	h.sweep()
@@ -202,6 +211,21 @@ func (h *Healer) pod(uid types.UID) *corev1.Pod {
 	return objs[0].(*corev1.Pod)
 }
 
+// selected reports whether the selector picks the volume. A volume whose driver
+// is unknown has no driver label.
+func (h *Healer) selected(pod *corev1.Pod, v volume) bool {
+	if h.cfg.Selector.Empty() {
+		return true
+	}
+	set := labels.Set{}
+	maps.Copy(set, pod.Labels)
+	set["namespace"] = pod.Namespace
+	if d, err := v.data(); err == nil {
+		set["driver"] = d.DriverName
+	}
+	return h.cfg.Selector.Matches(set)
+}
+
 // sweep guards the mounts of running pods and releases every other one. Each step
 // is idempotent, so it simply converges on what the pods look like right now.
 func (h *Healer) sweep() {
@@ -209,7 +233,7 @@ func (h *Healer) sweep() {
 	defer h.mu.Unlock()
 	for _, v := range h.volumes("*") {
 		pod := h.pod(v.podUID)
-		guard := h.cfg.Guard == GuardAlways && pod != nil && active(pod) && started(pod)
+		guard := h.cfg.Guard == GuardAlways && pod != nil && h.selected(pod, v) && active(pod) && started(pod)
 		if err := setImmutable(v.target, guard); err != nil {
 			klog.Warningf("setting guard on %s to %v: %v", v.target, guard, err)
 		}
@@ -231,8 +255,8 @@ func (h *Healer) scan(ctx context.Context) {
 	due := map[types.UID][]volume{}
 	for _, v := range h.volumes("*") {
 		pod := h.pod(v.podUID)
-		if pod == nil {
-			// Left over from a pod that is gone; kubelet cleans it up.
+		if pod == nil || !h.selected(pod, v) {
+			// A pod that is gone leaves this for kubelet to clean up.
 			continue
 		}
 		seen[v.target] = true

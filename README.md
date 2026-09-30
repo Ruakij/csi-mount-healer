@@ -96,7 +96,17 @@ on its node:
 | `-remount` | `REMOUNT` | `true` | remount before falling back to deleting the pod |
 | `-guard` | `GUARD` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
 | `-guard-interval` | `GUARD_INTERVAL` | `30s` | how soon new pods get guarded (`-guard=always`) |
+| `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | container runtime socket |
+
+The selector has the syntax of `kubectl -l`, its terms all have to match, and it
+sees the labels of the pod plus two of the volume: `namespace` and `driver`, the
+CSI driver name. These two override pod labels of the same name. A volume the
+selector leaves out is not checked, healed or guarded, e.g.:
+
+```sh
+-selector='driver in (csi.moosefs.com,seaweedfs-csi-driver),namespace notin (kube-system),!csi-mount-healer/skip'
+```
 
 A command-line flag wins over its environment variable. Plus the `klog` flags,
 e.g. `-v=2`, which have no environment variables.

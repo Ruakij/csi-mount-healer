@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
@@ -28,7 +29,7 @@ var (
 
 func main() {
 	var cfg healer.Config
-	var guard string
+	var guard, selector string
 
 	flag.StringVar(&cfg.NodeName, "node-name", "", "name of this node")
 	flag.StringVar(&cfg.KubeletRoot, "kubelet-root", "/var/lib/kubelet", "path to the kubelet directory, mounted at the same path as on the node")
@@ -38,6 +39,7 @@ func main() {
 	flag.BoolVar(&cfg.Remount, "remount", true, "remount a dead volume through its CSI driver before falling back to deleting the pod")
 	flag.StringVar(&guard, "guard", string(healer.GuardAlways), "make the directory underneath a mount immutable: always | remount | off")
 	flag.DurationVar(&cfg.GuardInterval, "guard-interval", 30*time.Second, "time between two passes guarding the mounts of new pods (guard=always)")
+	flag.StringVar(&selector, "selector", "", "label selector over the pod labels plus namespace and driver, picking the volumes to check, heal and guard; empty picks all")
 	flag.StringVar(&cfg.CRIEndpoint, "cri-endpoint", "unix:///run/containerd/containerd.sock", "container runtime socket, used to restart containers after a remount")
 
 	if err := applyEnv(flag.CommandLine, os.LookupEnv); err != nil {
@@ -56,6 +58,10 @@ func main() {
 		klog.Fatalf("dropping privileges: %v", err)
 	}
 	cfg.Guard = healer.GuardMode(guard)
+	var err error
+	if cfg.Selector, err = labels.Parse(selector); err != nil {
+		klog.Fatalf("invalid selector: %v", err)
+	}
 
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
