@@ -54,7 +54,7 @@ spec:
         - operator: Exists
       containers:
         - name: healer
-          image: ghcr.io/ruakij/csi-mount-healer:v0.1.0
+          image: ghcr.io/ruakij/csi-mount-healer:0.1.0
           env:
             - name: NODE_NAME
               valueFrom:
