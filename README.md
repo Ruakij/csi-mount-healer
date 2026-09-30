@@ -92,8 +92,8 @@ on its node:
 | Reason | Type | |
 |---|---|---|
 | `DeadMount` | Warning | a check failed, with the error and the strike count |
-| `Remounted` | Normal | a volume was mounted again through its driver, or swapped into a running container that holds nothing on the dead mount |
-| `StaleHandles` | Warning | a swapped container still holds handles on the dead mount, with their count and the processes; again whenever the count changes |
+| `Remounted` | Normal | a volume was mounted again through its driver, or swapped into a running container that holds nothing on the dead mount, or released it before `-live-timeout` |
+| `Remounted` | Warning | a volume was swapped into a running container that still holds handles on the dead mount, with their count, the processes and the time it goes to the next tier |
 | `Escalating` | Warning | a container goes from the live tier to the next, with the reason |
 | `DeletingPod` | Warning | the delete tier, with the reason the tiers before it did not heal it |
 | `NotHealed` | Warning | no enabled tier was left, with the reasons |
@@ -108,7 +108,8 @@ records a `NotHealed` event, and does nothing more.
 The live tier works per container: a container it cannot swap goes on to the
 next tier right away, and so does one whose processes still hold handles on the
 dead mount `-live-timeout` after the swap, with an `Escalating` event. Other
-containers of the pod keep their swap.
+containers of the pod keep their swap. A pod or container gone before then is
+left alone.
 
 | Tier | What happens | What the pod keeps | Skipped when |
 |---|---|---|---|
@@ -174,13 +175,14 @@ e.g. `-v=2`, which have no environment variables.
    its own, which is discarded afterwards. There it lazily unmounts the dead
    mount at the mount path and moves the clone there with `move_mount`.
 7. The processes of a swapped container may still hold the dead mount: open
-   files, working or root directories, mapped files. Every check counts them,
+   files, working or root directories, mapped files. They are counted
    across every process in the mount namespace of the container, through
    `mnt_id` in `/proc/<pid>/fdinfo`, which never touches the file, and `statx`
    with `STATX_MNT_ID` and `AT_STATX_DONT_SYNC` on `/proc/<pid>/cwd`, `root`
    and `map_files`, under the stat timeout. `ENOTCONN`, `ESTALE` or a hung
-   `statx` count as a handle on the dead mount. The swap is done at zero; after
-   `-live-timeout` the container goes on to the next tier.
+   `statx` count as a handle on the dead mount. The count runs right after the
+   swap and, if anything is held, once more `-live-timeout` later, when the
+   container goes on to the next tier unless it released them.
 8. The restart tier stops the running containers through the CRI instead.
    kubelet starts them again on the new mount.
 9. The delete tier deletes the pod with a UID precondition, so a pod recreated

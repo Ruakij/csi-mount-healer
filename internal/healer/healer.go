@@ -71,10 +71,7 @@ type Healer struct {
 	pods    cache.Indexer
 	events  record.EventRecorder
 	strikes map[string]int
-	// swaps are the containers the live tier swapped a new mount into, by pod UID
-	// and container name, until nothing holds their dead mounts.
-	swaps map[string]*swap
-	stale func(*swap) (int, []string, error)
+	stale   func(*swap) (int, []string, error)
 	// mu serialises changes to mounts and guard flags, so a sweep never guards or
 	// releases a volume halfway through a remount.
 	mu sync.Mutex
@@ -95,7 +92,7 @@ func New(cfg Config) (*Healer, error) {
 	if cfg.Selector == nil {
 		cfg.Selector = labels.Everything()
 	}
-	h := &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]int{}, swaps: map[string]*swap{}}
+	h := &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]int{}}
 	h.stale = func(s *swap) (int, []string, error) { return staleHandles(s.pid, s.ns, s.dead, cfg.StatTimeout) }
 	return h, nil
 }
@@ -155,7 +152,6 @@ func (h *Healer) Run(ctx context.Context) error {
 			h.sweep("*")
 		}
 		h.scan(ctx)
-		h.checkSwaps(ctx)
 	})
 
 	h.mu.Lock()

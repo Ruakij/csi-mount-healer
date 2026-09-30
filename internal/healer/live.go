@@ -35,11 +35,8 @@ type swap struct {
 	volumes   []string
 	pid       int
 	// ns is the inode of the mount namespace of the container.
-	ns    uint64
-	dead  map[uint64]bool
-	since time.Time
-	// handles is the count last reported in an event.
-	handles int
+	ns   uint64
+	dead map[uint64]bool
 }
 
 // live swaps the remounted volumes into the running containers that mount
@@ -70,11 +67,9 @@ func (h *Healer) live(ctx context.Context, pod *corev1.Pod, podVolumes map[strin
 			h.escalateContainer(ctx, pod, c.Name, fmt.Sprintf("swapping the new mount into it failed: %v", err))
 			continue
 		}
-		s.pod, s.container, s.since = pod.UID, c.Name, time.Now()
+		s.pod, s.container = pod.UID, c.Name
 		klog.Infof("pod %s/%s: swapped volumes %s into container %s", pod.Namespace, pod.Name, strings.Join(s.volumes, ", "), c.Name)
-		key := string(pod.UID) + "/" + c.Name
-		h.swaps[key] = s
-		h.checkSwap(ctx, key, s)
+		h.checkSwap(ctx, pod, s)
 	}
 	return nil
 }
@@ -129,44 +124,45 @@ func (h *Healer) escalateContainer(ctx context.Context, pod *corev1.Pod, name, w
 	})
 }
 
-func (h *Healer) checkSwaps(ctx context.Context) {
-	for key, s := range h.swaps {
-		h.checkSwap(ctx, key, s)
+// checkSwap reports whether a swapped container still holds handles on its
+// dead mounts, and gives it until LiveTimeout to release them.
+func (h *Healer) checkSwap(ctx context.Context, pod *corev1.Pod, s *swap) {
+	n, procs, err := h.stale(s)
+	volumes := strings.Join(s.volumes, ", ")
+	switch {
+	case errors.Is(err, errGone):
+	case err == nil && n == 0:
+		h.events.Eventf(pod, corev1.EventTypeNormal, "Remounted", "Swapped volumes %s into running container %s, nothing holds the dead mounts", volumes, s.container)
+	default:
+		held := fmt.Sprintf("counting the handles on the dead mounts failed: %v", err)
+		if err == nil {
+			held = fmt.Sprintf("%d handles held on the dead mounts: %s", n, strings.Join(procs, ", "))
+		}
+		deadline := time.Now().Add(h.cfg.LiveTimeout)
+		klog.Warningf("pod %s/%s: container %s: %s", pod.Namespace, pod.Name, s.container, held)
+		h.events.Eventf(pod, corev1.EventTypeWarning, "Remounted", "Swapped volumes %s into running container %s, %s; it goes to the next tier at %s unless they are released",
+			volumes, s.container, held, deadline.Format(time.TimeOnly))
+		// Nothing cancels the timer: a pod or container gone by then is found gone.
+		time.AfterFunc(h.cfg.LiveTimeout, func() { h.expireSwap(ctx, s) })
 	}
 }
 
-// checkSwap counts the handles a swapped container still holds on its dead
-// mounts, and sends it on to the next tier when they outlive LiveTimeout.
-func (h *Healer) checkSwap(ctx context.Context, key string, s *swap) {
+// expireSwap sends a swapped container on to the next tier when it still holds
+// handles on its dead mounts at the end of LiveTimeout.
+func (h *Healer) expireSwap(ctx context.Context, s *swap) {
 	pod := h.pod(s.pod)
-	if pod == nil || !active(pod) {
-		delete(h.swaps, key)
+	if ctx.Err() != nil || pod == nil || !active(pod) {
 		return
 	}
 	n, procs, err := h.stale(s)
 	switch {
 	case errors.Is(err, errGone):
-		delete(h.swaps, key)
 	case err != nil:
-		klog.Warningf("pod %s/%s: counting handles on the dead mounts of container %s: %v", pod.Namespace, pod.Name, s.container, err)
+		h.escalateContainer(ctx, pod, s.container, fmt.Sprintf("counting the handles on the dead mounts failed: %v", err))
 	case n == 0:
-		delete(h.swaps, key)
 		klog.Infof("pod %s/%s: container %s holds nothing on its dead mounts", pod.Namespace, pod.Name, s.container)
-		h.events.Eventf(pod, corev1.EventTypeNormal, "Remounted", "Swapped volumes %s into running container %s, nothing holds the dead mounts",
-			strings.Join(s.volumes, ", "), s.container)
+		h.events.Eventf(pod, corev1.EventTypeNormal, "Remounted", "Container %s released the dead mounts of volumes %s", s.container, strings.Join(s.volumes, ", "))
 	default:
-		klog.Warningf("pod %s/%s: container %s holds %d handles on its dead mounts: %s", pod.Namespace, pod.Name, s.container, n, strings.Join(procs, ", "))
-		// Checks run once per interval, so the timeout ends at the check nearest to
-		// it rather than one interval late.
-		if time.Until(s.since.Add(h.cfg.LiveTimeout)) < h.cfg.Interval/2 {
-			delete(h.swaps, key)
-			h.escalateContainer(ctx, pod, s.container, fmt.Sprintf("%d handles still on the dead mounts after %v: %s", n, h.cfg.LiveTimeout, strings.Join(procs, ", ")))
-			return
-		}
-		if n != s.handles {
-			s.handles = n
-			h.events.Eventf(pod, corev1.EventTypeWarning, "StaleHandles", "Container %s holds %d handles on the dead mounts of volumes %s: %s",
-				s.container, n, strings.Join(s.volumes, ", "), strings.Join(procs, ", "))
-		}
+		h.escalateContainer(ctx, pod, s.container, fmt.Sprintf("%d handles still on the dead mounts after %v: %s", n, h.cfg.LiveTimeout, strings.Join(procs, ", ")))
 	}
 }
