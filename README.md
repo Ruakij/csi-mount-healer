@@ -40,7 +40,8 @@ directory immutable, so such a container gets `EPERM` on its first write instead
   sidecars included, and watches until no process holds the dead mount; or
   restarts only those containers.
 - Deletes the pod when the restart tier fails or does not apply (`restartPolicy`
-  other than `Always`), and force deletes pods stuck terminating on a dead mount.
+  other than `Always`) and a controller recreates it, and force deletes pods
+  stuck terminating on a dead mount.
 - Heal tiers can be enabled one by one, down to only reporting dead mounts.
 - Guards the directory underneath each mount with the immutable flag
   (`chattr +i`), which stops even root in the pod: always, only while
@@ -117,7 +118,7 @@ whatever it holds on the dead mount.
 |---|---|---|---|
 | `live` | the volume is mounted again through its driver, and the new mount replaces the dead one inside each running container that uses it | everything, including the memory of every process | per container: a `subPathExpr`, another mount below the mount path, or a failed swap |
 | `restart` | the volume is mounted again through its driver, and the containers that use it are stopped for kubelet to start them again | the pod, its IP, its place on the node and every container that does not use the volume | `restartPolicy` is not `Always`, or the pod is terminating |
-| `delete` | the pod is deleted, and force deleted when it is already terminating | nothing | never |
+| `delete` | the pod is deleted, and force deleted when it is already terminating | nothing | the pod has no controller to recreate it (no `ownerReferences`) and is not terminating |
 
 With `-tiers=` empty, dead mounts are only reported, as `DeadMount` events and
 in the log.

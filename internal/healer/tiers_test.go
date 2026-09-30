@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 )
 
@@ -43,8 +44,10 @@ func TestEscalate(t *testing.T) {
 		name   string
 		tiers  string
 		policy corev1.RestartPolicy
-		from   Tier
-		fail   []Tier
+		// bare pods have no controller.
+		bare bool
+		from Tier
+		fail []Tier
 		// tried lists the tiers run, and why the ones that ran were chosen, or
 		// the reason of the NotHealed event when no tier was left.
 		tried []Tier
@@ -67,6 +70,10 @@ func TestEscalate(t *testing.T) {
 			tried: []Tier{TierDelete}, why: []string{"stuck terminating"}},
 		{name: "nothing left", tiers: "restart", fail: []Tier{TierRestart},
 			tried: []Tier{TierRestart}, why: []string{"", "the restart tier failed: boom; the delete tier is disabled"}},
+		{name: "bare pod", tiers: "live,restart,delete", policy: corev1.RestartPolicyNever, bare: true, fail: []Tier{TierLive},
+			tried: []Tier{TierLive}, why: []string{"", "the live tier failed: boom; the restart tier needs restartPolicy Always, the pod has Never; the delete tier needs a controller"}},
+		{name: "bare pod terminating", tiers: "restart,delete", bare: true, from: TierDelete,
+			tried: []Tier{TierDelete}, why: []string{"stuck terminating"}},
 		{name: "report only", tiers: "",
 			why: []string{"the restart tier is disabled; the delete tier is disabled"}},
 	}
@@ -81,8 +88,12 @@ func TestEscalate(t *testing.T) {
 			if tt.policy != "" {
 				pod.Spec.RestartPolicy = tt.policy
 			}
+			if !tt.bare {
+				pod.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "app"}}
+			}
 			why := ""
 			if tt.from == TierDelete {
+				pod.DeletionTimestamp = &metav1.Time{}
 				why = "it is stuck terminating on a dead mount"
 			}
 			var tried []Tier

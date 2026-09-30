@@ -47,6 +47,7 @@ func TestSwapTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pod := testPod()
 			pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
+			pod.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "app"}}
 			pods := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{uidIndex: indexByUID})
 			if !tt.podGone {
 				_ = pods.Add(pod)
