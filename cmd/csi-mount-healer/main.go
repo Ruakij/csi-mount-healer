@@ -30,7 +30,7 @@ func main() {
 	var cfg healer.Config
 	var guard string
 
-	flag.StringVar(&cfg.NodeName, "node-name", os.Getenv("NODE_NAME"), "name of this node (default: $NODE_NAME)")
+	flag.StringVar(&cfg.NodeName, "node-name", "", "name of this node")
 	flag.StringVar(&cfg.KubeletRoot, "kubelet-root", "/var/lib/kubelet", "path to the kubelet directory, mounted at the same path as on the node")
 	flag.DurationVar(&cfg.Interval, "interval", 5*time.Minute, "time between two checks of every mount")
 	flag.IntVar(&cfg.Strikes, "strikes", 3, "checks in a row a mount has to fail before it is healed")
@@ -40,6 +40,9 @@ func main() {
 	flag.DurationVar(&cfg.GuardInterval, "guard-interval", 30*time.Second, "time between two passes guarding the mounts of new pods (guard=always)")
 	flag.StringVar(&cfg.CRIEndpoint, "cri-endpoint", "unix:///run/containerd/containerd.sock", "container runtime socket, used to restart containers after a remount")
 
+	if err := applyEnv(flag.CommandLine, os.LookupEnv); err != nil {
+		klog.Fatalf("%v", err)
+	}
 	showVersion := flag.Bool("version", false, "show version")
 
 	klog.InitFlags(nil)

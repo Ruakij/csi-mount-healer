@@ -60,7 +60,7 @@ request service account tokens (`CSIDriver.spec.tokenRequests`).
 kubectl apply -f https://raw.githubusercontent.com/Ruakij/csi-mount-healer/main/deploy/csi-mount-healer.yaml
 ```
 
-On k3s, point `-cri-endpoint` and the `cri` hostPath at
+On k3s, point `CRI_ENDPOINT` and the `cri` hostPath at
 `/run/k3s/containerd/containerd.sock`.
 
 The ClusterRole can read every secret: kubelet passes node stage and publish
@@ -68,19 +68,20 @@ secrets to the driver, and the healer has to pass the same ones.
 
 ## Configuration
 
-| Flag | Default | |
-|---|---|---|
-| `-node-name` | `$NODE_NAME` | node to watch |
-| `-kubelet-root` | `/var/lib/kubelet` | kubelet directory, mounted at the same path as on the node |
-| `-interval` | `5m` | time between two checks of every mount |
-| `-strikes` | `3` | failed checks in a row before a mount is healed |
-| `-stat-timeout` | `30s` | how long a `stat` may take before the mount counts as hung |
-| `-remount` | `true` | remount before falling back to deleting the pod |
-| `-guard` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
-| `-guard-interval` | `30s` | how soon new pods get guarded (`-guard=always`) |
-| `-cri-endpoint` | `unix:///run/containerd/containerd.sock` | container runtime socket |
+| Flag | Environment | Default | |
+|---|---|---|---|
+| `-node-name` | `NODE_NAME` | | node to watch |
+| `-kubelet-root` | `KUBELET_ROOT` | `/var/lib/kubelet` | kubelet directory, mounted at the same path as on the node |
+| `-interval` | `INTERVAL` | `5m` | time between two checks of every mount |
+| `-strikes` | `STRIKES` | `3` | failed checks in a row before a mount is healed |
+| `-stat-timeout` | `STAT_TIMEOUT` | `30s` | how long a `stat` may take before the mount counts as hung |
+| `-remount` | `REMOUNT` | `true` | remount before falling back to deleting the pod |
+| `-guard` | `GUARD` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
+| `-guard-interval` | `GUARD_INTERVAL` | `30s` | how soon new pods get guarded (`-guard=always`) |
+| `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | container runtime socket |
 
-Plus the `klog` flags, e.g. `-v=2`.
+A command-line flag wins over its environment variable. Plus the `klog` flags,
+e.g. `-v=2`, which have no environment variables.
 
 ## How it works
 

@@ -55,13 +55,13 @@ spec:
       containers:
         - name: healer
           image: ghcr.io/ruakij/csi-mount-healer:v0.1.0
-          args:
-            - -cri-endpoint=unix:///run/containerd/containerd.sock
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: CRI_ENDPOINT
+              value: unix:///run/containerd/containerd.sock
           securityContext:
             # Unmounting and setting the immutable flag need CAP_SYS_ADMIN and
             # CAP_LINUX_IMMUTABLE on the host's mounts; Bidirectional propagation
