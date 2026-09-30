@@ -54,8 +54,11 @@ type Config struct {
 	// LiveTimeout is how long a container swapped by the live tier may hold on to
 	// the dead mount before it is escalated to the next tier; 0 disables that.
 	LiveTimeout time.Duration
-	Guard       GuardMode
-	CRIEndpoint string
+	// DeleteOnDriverDown escalates a volume whose driver cannot be reached, which
+	// ends at the delete tier, instead of healing it again at the next check.
+	DeleteOnDriverDown bool
+	Guard              GuardMode
+	CRIEndpoint        string
 	// Selector picks the volumes to check, heal and guard. It matches the labels
 	// of the pod plus namespace and driver, which override pod labels of the same
 	// name. Nil or empty picks every volume.
@@ -71,7 +74,9 @@ type Healer struct {
 	pods    cache.Indexer
 	events  record.EventRecorder
 	strikes map[string]int
-	stale   func(*swap) (int, []string, error)
+	// down are the drivers found down during the current scan, by name.
+	down  map[string]error
+	stale func(*swap) (int, []string, error)
 	// mu serialises changes to mounts and guard flags, so a sweep never guards or
 	// releases a volume halfway through a remount.
 	mu sync.Mutex
@@ -252,6 +257,7 @@ func (h *Healer) sweep(podUID string) {
 }
 
 func (h *Healer) scan(ctx context.Context) {
+	h.down = map[string]error{}
 	seen := map[string]bool{}
 	due := map[types.UID][]volume{}
 	for _, v := range h.volumes("*") {
@@ -270,10 +276,11 @@ func (h *Healer) scan(ctx context.Context) {
 		h.strikes[v.target]++
 		klog.Warningf("pod %s/%s volume %s: %s (strike %d/%d)",
 			pod.Namespace, pod.Name, filepath.Base(v.dir), reason, h.strikes[v.target], h.cfg.Strikes)
-		if h.strikes[v.target] >= h.cfg.Strikes {
+		if h.strikes[v.target] == h.cfg.Strikes {
 			h.events.Eventf(pod, corev1.EventTypeWarning, "DeadMount", "Volume %s: %s, %d checks in a row",
 				filepath.Base(v.dir), reason, h.cfg.Strikes)
-			delete(h.strikes, v.target)
+		}
+		if h.strikes[v.target] >= h.cfg.Strikes {
 			due[pod.UID] = append(due[pod.UID], v)
 		}
 	}
@@ -283,8 +290,12 @@ func (h *Healer) scan(ctx context.Context) {
 		}
 	}
 	for uid, vols := range due {
-		if pod := h.pod(uid); pod != nil {
-			h.heal(ctx, pod, vols)
+		if pod := h.pod(uid); pod != nil && !h.heal(ctx, pod, vols) {
+			// The strikes stay, so the next check heals again.
+			continue
+		}
+		for _, v := range vols {
+			delete(h.strikes, v.target)
 		}
 	}
 }
@@ -303,22 +314,34 @@ func deadReason(pod *corev1.Pod, mounted bool, err error) string {
 	return ""
 }
 
-func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) {
+// heal reports false when the driver cannot be reached and DeleteOnDriverDown
+// is off, for the next check to heal again.
+func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) bool {
+	healed := true
 	from, why := Tier(0), ""
 	if pod.DeletionTimestamp != nil {
 		from, why = TierDelete, "it is stuck terminating on a dead mount"
 	}
 	// Pod volume names to their targets, once remounted.
 	var podVolumes map[string]string
+	var remountErr error
 	h.escalate(pod, from, why, func(t Tier, why string) error {
 		if t == TierDelete {
 			return h.deletePod(ctx, pod, why)
 		}
-		if podVolumes == nil {
-			var err error
-			if podVolumes, err = h.remountAll(ctx, pod, vols); err != nil {
-				return err
-			}
+		if podVolumes == nil && remountErr == nil {
+			podVolumes, remountErr = h.remountAll(ctx, pod, vols)
+		}
+		switch {
+		case errors.Is(remountErr, errDriverDown) && !h.cfg.DeleteOnDriverDown:
+			klog.Warningf("pod %s/%s: %v, healing again at the next check", pod.Namespace, pod.Name, remountErr)
+			// A fixed message, so repeats are counted on one event.
+			h.events.Eventf(pod, corev1.EventTypeWarning, "DriverDown", "The CSI driver cannot be reached, healing again at the next check")
+			healed = false
+			return nil
+		case remountErr != nil:
+			// Every tier before delete needs the remount; it is not tried twice.
+			return remountErr
 		}
 		if t == TierLive {
 			return h.live(ctx, pod, podVolumes)
@@ -332,6 +355,7 @@ func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) {
 		}
 		return nil
 	})
+	return healed
 }
 
 func (h *Healer) remountAll(ctx context.Context, pod *corev1.Pod, vols []volume) (map[string]string, error) {
