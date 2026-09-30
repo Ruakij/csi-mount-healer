@@ -38,7 +38,7 @@ func main() {
 	flag.DurationVar(&cfg.StatTimeout, "stat-timeout", 30*time.Second, "how long a stat may take before the mount counts as hung")
 	_ = cfg.Tiers.Set("live,restart,delete")
 	flag.Var(&cfg.Tiers, "tiers", "comma-separated heal tiers to use, least disruptive first whatever the order: live, restart, delete; empty only reports")
-	flag.DurationVar(&cfg.LiveTimeout, "live-timeout", 5*time.Minute, "how long a container swapped by the live tier may hold handles on the dead mount before it goes to the next tier; 0 disables the escalation")
+	flag.DurationVar(&cfg.LiveTimeout, "live-timeout", 5*time.Minute, "how long a container swapped by the live tier may hold handles on the dead mount before it is escalated to the next tier; 0 disables the escalation")
 	flag.StringVar(&guard, "guard", string(healer.GuardAlways), "make the directory underneath a mount immutable: always | remount | off")
 	flag.StringVar(&selector, "selector", "", "label selector over the pod labels plus namespace and driver, picking the volumes to check, heal and guard; empty picks all")
 	flag.StringVar(&cfg.CRIEndpoint, "cri-endpoint", "unix:///run/containerd/containerd.sock", "container runtime socket, used to restart containers after a remount")

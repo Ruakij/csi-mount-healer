@@ -52,7 +52,7 @@ type Config struct {
 	StatTimeout time.Duration
 	Tiers       Tiers
 	// LiveTimeout is how long a container swapped by the live tier may hold on to
-	// the dead mount before it goes on to the next tier; 0 disables that.
+	// the dead mount before it is escalated to the next tier; 0 disables that.
 	LiveTimeout time.Duration
 	Guard       GuardMode
 	CRIEndpoint string
