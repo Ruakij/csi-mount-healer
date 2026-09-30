@@ -19,7 +19,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestDropPrivileges(t *testing.T) {
-	want := "0000000000200204" // CAP_SYS_ADMIN (21), CAP_LINUX_IMMUTABLE (9), CAP_DAC_READ_SEARCH (2)
+	want := "00000000002c0204" // CAP_SYS_ADMIN (21), CAP_SYS_PTRACE (19), CAP_SYS_CHROOT (18), CAP_LINUX_IMMUTABLE (9), CAP_DAC_READ_SEARCH (2)
 	tasks, err := filepath.Glob("/proc/self/task/*/status")
 	if err != nil || len(tasks) == 0 {
 		t.Fatalf("no tasks: %v", err)

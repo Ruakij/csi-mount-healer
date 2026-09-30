@@ -6,9 +6,9 @@
 pods from writing to the node disk while a mount is missing.**
 
 A DaemonSet that checks every CSI mount kubelet made on its node. A dead one is
-mounted again by calling the driver the way kubelet did, and the containers using
-it are restarted onto the new mount. When that is not possible, the pod is
-deleted. Which of these it may do is configurable as [heal tiers](#heal-tiers).
+mounted again by calling the driver the way kubelet did, and the new mount is
+swapped into the running containers that use it, or those are restarted onto
+it. When that is not possible, the pod is deleted. Which of these it may do is configurable as [heal tiers](#heal-tiers).
 
 ## Why
 
@@ -18,8 +18,9 @@ not connected`. kubelet never mounts a volume again for a running pod, so the po
 stays broken until someone deletes it.
 
 Deleting it is the usual fix, but a restarted pod loses what it held in memory.
-Remounting under the running pod keeps it: the containers are restarted, the pod,
-its IP and its place on the node stay.
+Remounting under the running pod keeps it: the new mount is swapped into the
+running containers, or the containers are restarted, and the pod, its IP and its
+place on the node stay.
 
 Worse than a dead mount is a missing one. Once a dead mount is unmounted, the
 empty directory underneath is a plain directory on the node disk, and the next
@@ -34,7 +35,9 @@ directory immutable, so such a container gets `EPERM` on its first write instead
 - Remounts through the node service of the driver with the request kubelet built:
   access mode, fs type, mount options, volume attributes, pod info, secrets,
   publish context, `fsGroup`. Restages first when the staging mount is dead too.
-- Restarts only the containers that mount the volume, sidecars included.
+- Swaps the new mount into the running containers that mount the volume,
+  sidecars included, and watches until no process holds the dead mount; or
+  restarts only those containers.
 - Deletes the pod when the restart tier fails or does not apply (`restartPolicy`
   other than `Always`), and force deletes pods stuck terminating on a dead mount.
 - Heal tiers can be enabled one by one, down to only reporting dead mounts.
@@ -46,12 +49,16 @@ directory immutable, so such a container gets `EPERM` on its first write instead
 
 - Kubernetes 1.26 or newer, for the fsGroup kubelet hands to CSI drivers with
   `VOLUME_MOUNT_GROUP`. Tested on 1.37.
-- Linux 5.8 or newer (`statx` mount root, `open_tree`).
+- Linux 5.8 or newer (`statx` mount root, `open_tree`); 5.12 or newer for the
+  live tier (`mount_setattr`).
 - A filesystem under `/var/lib/kubelet` that supports the immutable flag (ext4,
   xfs, btrfs, zfs, ...), for the guard.
 - CSI drivers registered with kubelet through `node-driver-registrar`, with their
   sockets under the kubelet directory.
-- A CRI runtime socket, to restart containers after a remount.
+- A CRI runtime socket, to restart containers after a remount. The live tier
+  reads the pid of a container from the verbose container status, which
+  containerd reports.
+- `hostPID`, for the live tier to reach container processes through `/proc`.
 
 Not rebuilt, so healed by deleting the pod: raw block volumes and drivers that
 request service account tokens (`CSIDriver.spec.tokenRequests`).
@@ -67,8 +74,12 @@ On k3s, point `CRI_ENDPOINT` and the `cri` hostPath at
 
 The container is privileged, as Bidirectional mount propagation requires, but
 the binary drops every capability except `CAP_SYS_ADMIN`,
-`CAP_LINUX_IMMUTABLE` and `CAP_DAC_READ_SEARCH` at startup and sets
-`no_new_privs`.
+`CAP_LINUX_IMMUTABLE`, `CAP_DAC_READ_SEARCH`, `CAP_SYS_PTRACE` and
+`CAP_SYS_CHROOT` at startup and sets `no_new_privs`. The last two are for the
+live tier: `CAP_SYS_PTRACE` opens the `/proc` entries of container processes
+running as other users, and `setns` into a mount namespace needs
+`CAP_SYS_CHROOT`. The DaemonSet runs with `hostPID`, so the pids the runtime
+reports are visible.
 
 The ClusterRole can read every secret: kubelet passes node stage and publish
 secrets to the driver, and the healer has to pass the same ones.
@@ -81,8 +92,10 @@ on its node:
 | Reason | Type | |
 |---|---|---|
 | `DeadMount` | Warning | a check failed, with the error and the strike count |
-| `Remounted` | Normal | a volume was mounted again through its driver |
-| `DeletingPod` | Warning | the delete tier, with the reason the restart tier did not heal it |
+| `Remounted` | Normal | a volume was mounted again through its driver, or swapped into a running container that holds nothing on the dead mount |
+| `StaleHandles` | Warning | a swapped container still holds handles on the dead mount, with their count and the processes; repeated every check |
+| `Escalating` | Warning | a container goes from the live tier to the next, with the reason |
+| `DeletingPod` | Warning | the delete tier, with the reason the tiers before it did not heal it |
 | `NotHealed` | Warning | no enabled tier was left, with the reasons |
 
 ## Heal tiers
@@ -92,8 +105,14 @@ disruptive first, whatever the order in `-tiers`. When a tier fails, the volume
 goes on to the next enabled one. When none is left, the healer logs it and
 records a `NotHealed` event, and does nothing more.
 
+The live tier works per container: a container it cannot swap goes on to the
+next tier right away, and so does one whose processes still hold handles on the
+dead mount `-live-timeout` after the swap, with an `Escalating` event. Other
+containers of the pod keep their swap.
+
 | Tier | What happens | What the pod keeps | Skipped when |
 |---|---|---|---|
+| `live` | the volume is mounted again through its driver, and the new mount replaces the dead one inside each running container that uses it | everything, including the memory of every process | per container: a `subPathExpr`, another mount below the mount path, or a failed swap |
 | `restart` | the volume is mounted again through its driver, and the containers that use it are stopped for kubelet to start them again | the pod, its IP, its place on the node and every container that does not use the volume | `restartPolicy` is not `Always`, or the pod is terminating |
 | `delete` | the pod is deleted, and force deleted when it is already terminating | nothing | never |
 
@@ -109,7 +128,8 @@ in the log.
 | `-interval` | `INTERVAL` | `5m` | time between two checks of every mount |
 | `-strikes` | `STRIKES` | `3` | failed checks in a row before a mount is healed |
 | `-stat-timeout` | `STAT_TIMEOUT` | `30s` | how long a `stat` may take before the mount counts as hung |
-| `-tiers` | `TIERS` | `restart,delete` | [heal tiers](#heal-tiers) to use; empty only reports |
+| `-tiers` | `TIERS` | `live,restart,delete` | [heal tiers](#heal-tiers) to use; empty only reports |
+| `-live-timeout` | `LIVE_TIMEOUT` | `5m` | how long a container swapped by the live tier may hold handles on the dead mount before it goes to the next tier |
 | `-guard` | `GUARD` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
 | `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | container runtime socket |
@@ -147,22 +167,36 @@ e.g. `-v=2`, which have no environment variables.
 5. subPath binds of the volume still point into the dead mount, and kubelet
    reuses a bind that exists, so they are unmounted and kubelet binds them again.
 6. Containers see volumes through their own bind of the target, made when they
-   started, so the restart tier stops the running ones through the CRI. kubelet
-   starts them again on the new mount.
-7. The delete tier deletes the pod with a UID precondition, so a pod recreated
+   started. The live tier replaces that bind: it finds the main process of each
+   running container through the verbose CRI container status, clones the new
+   mount (or its subPath) with `open_tree`, read-only if the volumeMount is,
+   and enters the mount namespace of the container with `setns` on a thread of
+   its own, which is discarded afterwards. There it lazily unmounts the dead
+   mount at the mount path and moves the clone there with `move_mount`.
+7. The processes of a swapped container may still hold the dead mount: open
+   files, working or root directories, mapped files. Every check counts them,
+   across every process in the mount namespace of the container, through
+   `mnt_id` in `/proc/<pid>/fdinfo`, which never touches the file, and `statx`
+   with `STATX_MNT_ID` and `AT_STATX_DONT_SYNC` on `/proc/<pid>/cwd`, `root`
+   and `map_files`, under the stat timeout. `ENOTCONN`, `ESTALE` or a hung
+   `statx` count as a handle on the dead mount. The swap is done at zero; after
+   `-live-timeout` the container goes on to the next tier.
+8. The restart tier stops the running containers through the CRI instead.
+   kubelet starts them again on the new mount.
+9. The delete tier deletes the pod with a UID precondition, so a pod recreated
    under the same name is left alone.
-8. The guard sets `FS_IMMUTABLE_FL` on the directory underneath the mount,
-   reached through a non-recursive `open_tree` clone of the parent, which shows
-   the directory without what is mounted on it and never touches a hung mount. A
-   pod is guarded as soon as a pod watch sees its first container start.
-   kubelet cannot remove an immutable directory when the pod stops, so the flag
-   is cleared as soon as a pod watch sees the pod terminate, and for every mount
-   when the healer shuts down.
+10. The guard sets `FS_IMMUTABLE_FL` on the directory underneath the mount,
+    reached through a non-recursive `open_tree` clone of the parent, which shows
+    the directory without what is mounted on it and never touches a hung mount. A
+    pod is guarded as soon as a pod watch sees its first container start.
+    kubelet cannot remove an immutable directory when the pod stops, so the flag
+    is cleared as soon as a pod watch sees the pod terminate, and for every mount
+    when the healer shuts down.
 
 ## Development
 
 ```sh
 git config core.hooksPath .githooks  # gofmt, vet, tests and lint before each commit
 make build       # bin/csi-mount-healer
-make test-mount  # real mounts, guards and a remount through a fake driver, needs Docker
+make test-mount  # real mounts, guards, a remount through a fake driver and a live swap, needs Docker
 ```

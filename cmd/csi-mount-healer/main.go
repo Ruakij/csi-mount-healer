@@ -1,6 +1,6 @@
 // Command csi-mount-healer watches the CSI mounts of the pods on its node and
-// heals a dead one: mounting it again through its CSI driver and restarting the
-// containers that use it, or deleting the pod. It can also make the directory underneath each mount immutable, so a pod
+// heals a dead one: mounting it again through its CSI driver and swapping the new
+// mount into the running containers or restarting them, or deleting the pod. It can also make the directory underneath each mount immutable, so a pod
 // never writes to the node disk while its mount is missing.
 package main
 
@@ -36,8 +36,9 @@ func main() {
 	flag.DurationVar(&cfg.Interval, "interval", 5*time.Minute, "time between two checks of every mount")
 	flag.IntVar(&cfg.Strikes, "strikes", 3, "checks in a row a mount has to fail before it is healed")
 	flag.DurationVar(&cfg.StatTimeout, "stat-timeout", 30*time.Second, "how long a stat may take before the mount counts as hung")
-	_ = cfg.Tiers.Set("restart,delete")
-	flag.Var(&cfg.Tiers, "tiers", "comma-separated heal tiers to use, least disruptive first whatever the order: restart, delete; empty only reports")
+	_ = cfg.Tiers.Set("live,restart,delete")
+	flag.Var(&cfg.Tiers, "tiers", "comma-separated heal tiers to use, least disruptive first whatever the order: live, restart, delete; empty only reports")
+	flag.DurationVar(&cfg.LiveTimeout, "live-timeout", 5*time.Minute, "how long a container swapped by the live tier may hold handles on the dead mount before it goes to the next tier")
 	flag.StringVar(&guard, "guard", string(healer.GuardAlways), "make the directory underneath a mount immutable: always | remount | off")
 	flag.StringVar(&selector, "selector", "", "label selector over the pod labels plus namespace and driver, picking the volumes to check, heal and guard; empty picks all")
 	flag.StringVar(&cfg.CRIEndpoint, "cri-endpoint", "unix:///run/containerd/containerd.sock", "container runtime socket, used to restart containers after a remount")

@@ -14,12 +14,13 @@ import (
 type Tier int
 
 const (
-	TierRestart Tier = iota
+	TierLive Tier = iota
+	TierRestart
 	TierDelete
 	tierCount
 )
 
-var tierNames = [tierCount]string{"restart", "delete"}
+var tierNames = [tierCount]string{"live", "restart", "delete"}
 
 func (t Tier) String() string { return tierNames[t] }
 

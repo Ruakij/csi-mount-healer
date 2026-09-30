@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -263,35 +264,27 @@ func dial(endpoint string) (*grpc.ClientConn, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 }
 
-// restartContainers stops the running containers that mount one of the pod
-// volumes, each of which still sees the dead mount. kubelet starts them again
-// on the new one.
-func (h *Healer) restartContainers(ctx context.Context, pod *corev1.Pod, podVolumes map[string]bool) error {
-	names := map[string]bool{}
+// containersUsing lists the containers of the pod that mount one of the pod
+// volumes. Only sidecars among the init containers keep running; the others are
+// done by now.
+func containersUsing(pod *corev1.Pod, podVolumes map[string]string) []corev1.Container {
+	var using []corev1.Container
 	containers := pod.Spec.Containers
 	for _, c := range pod.Spec.InitContainers {
-		// Only sidecars keep running; other init containers are done by now.
 		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
 			containers = append(containers, c)
 		}
 	}
 	for _, c := range containers {
-		for _, m := range c.VolumeMounts {
-			if podVolumes[m.Name] {
-				names[c.Name] = true
-			}
+		if slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return podVolumes[m.Name] != "" }) {
+			using = append(using, c)
 		}
 	}
-	if len(names) == 0 {
-		return nil
-	}
+	return using
+}
 
-	conn, err := dial(h.cfg.CRIEndpoint)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	rt := runtimeapi.NewRuntimeServiceClient(conn)
+// runningContainers maps the names of the running containers of the pod to them.
+func runningContainers(ctx context.Context, rt runtimeapi.RuntimeServiceClient, pod *corev1.Pod) (map[string]*runtimeapi.Container, error) {
 	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	resp, err := rt.ListContainers(lctx, &runtimeapi.ListContainersRequest{Filter: &runtimeapi.ContainerFilter{
@@ -299,7 +292,30 @@ func (h *Healer) restartContainers(ctx context.Context, pod *corev1.Pod, podVolu
 		LabelSelector: map[string]string{"io.kubernetes.pod.uid": string(pod.UID)},
 	}})
 	if err != nil {
-		return fmt.Errorf("listing containers: %w", err)
+		return nil, fmt.Errorf("listing containers: %w", err)
+	}
+	running := map[string]*runtimeapi.Container{}
+	for _, c := range resp.GetContainers() {
+		running[c.GetLabels()["io.kubernetes.container.name"]] = c
+	}
+	return running, nil
+}
+
+// restartContainers stops the named containers that are running, each of which
+// still sees the dead mount. kubelet starts them again on the new one.
+func (h *Healer) restartContainers(ctx context.Context, pod *corev1.Pod, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	conn, err := dial(h.cfg.CRIEndpoint)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	rt := runtimeapi.NewRuntimeServiceClient(conn)
+	running, err := runningContainers(ctx, rt, pod)
+	if err != nil {
+		return err
 	}
 
 	grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
@@ -307,9 +323,9 @@ func (h *Healer) restartContainers(ctx context.Context, pod *corev1.Pod, podVolu
 		grace = *pod.Spec.TerminationGracePeriodSeconds
 	}
 	var errs []error
-	for _, c := range resp.GetContainers() {
-		name := c.GetLabels()["io.kubernetes.container.name"]
-		if !names[name] {
+	for _, name := range names {
+		c := running[name]
+		if c == nil {
 			continue
 		}
 		klog.Infof("pod %s/%s: stopping container %s", pod.Namespace, pod.Name, name)

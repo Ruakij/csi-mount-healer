@@ -51,6 +51,9 @@ type Config struct {
 	Strikes     int
 	StatTimeout time.Duration
 	Tiers       Tiers
+	// LiveTimeout is how long a container swapped by the live tier may hold on to
+	// the dead mount before it goes on to the next tier.
+	LiveTimeout time.Duration
 	Guard       GuardMode
 	CRIEndpoint string
 	// Selector picks the volumes to check, heal and guard. It matches the labels
@@ -68,6 +71,10 @@ type Healer struct {
 	pods    cache.Indexer
 	events  record.EventRecorder
 	strikes map[string]int
+	// swaps are the containers the live tier swapped a new mount into, by pod UID
+	// and container name, until nothing holds their dead mounts.
+	swaps map[string]*swap
+	stale func(*swap) (int, []string, error)
 	// mu serialises changes to mounts and guard flags, so a sweep never guards or
 	// releases a volume halfway through a remount.
 	mu sync.Mutex
@@ -88,7 +95,9 @@ func New(cfg Config) (*Healer, error) {
 	if cfg.Selector == nil {
 		cfg.Selector = labels.Everything()
 	}
-	return &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]int{}}, nil
+	h := &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]int{}, swaps: map[string]*swap{}}
+	h.stale = func(s *swap) (int, []string, error) { return staleHandles(s.pid, s.ns, s.dead, cfg.StatTimeout) }
+	return h, nil
 }
 
 // Run checks the mounts until ctx is done, then releases every guard so nothing
@@ -99,9 +108,7 @@ func (h *Healer) Run(ctx context.Context) error {
 			o.FieldSelector = fields.OneTermEqualSelector("spec.nodeName", h.cfg.NodeName).String()
 		}))
 	informer := factory.Core().V1().Pods().Informer()
-	if err := informer.AddIndexers(cache.Indexers{uidIndex: func(obj any) ([]string, error) {
-		return []string{string(obj.(*corev1.Pod).UID)}, nil
-	}}); err != nil {
+	if err := informer.AddIndexers(cache.Indexers{uidIndex: indexByUID}); err != nil {
 		return err
 	}
 	// A pod is guarded as soon as its first container starts.
@@ -136,8 +143,8 @@ func (h *Healer) Run(ctx context.Context) error {
 	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 		return ctx.Err()
 	}
-	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, tiers %q, guard %s, selector %q",
-		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.Guard, h.cfg.Selector)
+	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, tiers %q, live timeout %v, guard %s, selector %q",
+		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.LiveTimeout, h.cfg.Guard, h.cfg.Selector)
 
 	// Also clears what a previous run in another mode left behind.
 	h.sweep("*")
@@ -148,6 +155,7 @@ func (h *Healer) Run(ctx context.Context) error {
 			h.sweep("*")
 		}
 		h.scan(ctx)
+		h.checkSwaps(ctx)
 	})
 
 	h.mu.Lock()
@@ -158,6 +166,10 @@ func (h *Healer) Run(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func indexByUID(obj any) ([]string, error) {
+	return []string{string(obj.(*corev1.Pod).UID)}, nil
 }
 
 func every(ctx context.Context, interval time.Duration, fn func()) {
@@ -297,31 +309,44 @@ func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) {
 	if pod.DeletionTimestamp != nil {
 		from, why = TierDelete, "it is stuck terminating on a dead mount"
 	}
+	// Pod volume names to their targets, once remounted.
+	var podVolumes map[string]string
 	h.escalate(pod, from, why, func(t Tier, why string) error {
 		if t == TierDelete {
 			return h.deletePod(ctx, pod, why)
 		}
-		return h.restart(ctx, pod, vols)
+		if podVolumes == nil {
+			var err error
+			if podVolumes, err = h.remountAll(ctx, pod, vols); err != nil {
+				return err
+			}
+		}
+		if t == TierLive {
+			return h.live(ctx, pod, podVolumes)
+		}
+		var names []string
+		for _, c := range containersUsing(pod, podVolumes) {
+			names = append(names, c.Name)
+		}
+		if err := h.restartContainers(ctx, pod, names); err != nil {
+			return fmt.Errorf("restarting its containers: %w", err)
+		}
+		return nil
 	})
 }
 
-// restart remounts the volumes and stops the containers that use them, for
-// kubelet to start them again on the new mounts.
-func (h *Healer) restart(ctx context.Context, pod *corev1.Pod, vols []volume) error {
-	podVolumes := map[string]bool{}
+func (h *Healer) remountAll(ctx context.Context, pod *corev1.Pod, vols []volume) (map[string]string, error) {
+	podVolumes := map[string]string{}
 	for _, v := range vols {
 		name, err := h.remount(ctx, pod, v)
 		if err != nil {
-			return fmt.Errorf("remounting %s: %w", filepath.Base(v.dir), err)
+			return nil, fmt.Errorf("remounting %s: %w", filepath.Base(v.dir), err)
 		}
 		klog.Infof("pod %s/%s: remounted volume %s", pod.Namespace, pod.Name, name)
 		h.events.Eventf(pod, corev1.EventTypeNormal, "Remounted", "Remounted volume %s through its CSI driver", name)
-		podVolumes[name] = true
+		podVolumes[name] = v.target
 	}
-	if err := h.restartContainers(ctx, pod, podVolumes); err != nil {
-		return fmt.Errorf("restarting its containers: %w", err)
-	}
-	return nil
+	return podVolumes, nil
 }
 
 func (h *Healer) deletePod(ctx context.Context, pod *corev1.Pod, reason string) error {

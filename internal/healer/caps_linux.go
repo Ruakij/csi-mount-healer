@@ -13,11 +13,13 @@ import (
 )
 
 // keptCaps are all the healer uses: unmounting and open_tree (CAP_SYS_ADMIN), the
-// guard (CAP_LINUX_IMMUTABLE), and opening the directory underneath a mount for
-// the guard, which the pod may own with a mode that locks root out
-// (CAP_DAC_READ_SEARCH). Everything else it touches is owned by root: the kubelet
-// directory, the CSI and CRI sockets.
-var keptCaps = []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_LINUX_IMMUTABLE, unix.CAP_DAC_READ_SEARCH}
+// guard (CAP_LINUX_IMMUTABLE), opening the directory underneath a mount for the
+// guard, which the pod may own with a mode that locks root out
+// (CAP_DAC_READ_SEARCH), and for the live tier the /proc entries of container
+// processes running as other users (CAP_SYS_PTRACE) and setns into their mount
+// namespace (CAP_SYS_CHROOT). Everything else it touches is owned by root: the
+// kubelet directory, the CSI and CRI sockets.
+var keptCaps = []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_LINUX_IMMUTABLE, unix.CAP_DAC_READ_SEARCH, unix.CAP_SYS_PTRACE, unix.CAP_SYS_CHROOT}
 
 // capsHeader and capsData stay at a fixed address while the kernel reads them.
 var (

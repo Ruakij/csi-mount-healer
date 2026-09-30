@@ -52,6 +52,9 @@ spec:
         app: csi-mount-healer
     spec:
       serviceAccountName: csi-mount-healer
+      # The live tier finds container processes by the pids the CRI reports, and
+      # enters their mount namespaces through /proc.
+      hostPID: true
       priorityClassName: system-node-critical
       tolerations:
         - operator: Exists
@@ -68,8 +71,8 @@ spec:
           securityContext:
             # Bidirectional propagation requires privileged, which grants every
             # capability and ignores capabilities.drop; the binary drops all but
-            # CAP_SYS_ADMIN, CAP_LINUX_IMMUTABLE and CAP_DAC_READ_SEARCH itself at
-            # startup.
+            # CAP_SYS_ADMIN, CAP_LINUX_IMMUTABLE, CAP_DAC_READ_SEARCH,
+            # CAP_SYS_PTRACE and CAP_SYS_CHROOT itself at startup.
             privileged: true
             readOnlyRootFilesystem: true
           resources:

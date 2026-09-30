@@ -17,8 +17,8 @@ func TestTiersSet(t *testing.T) {
 		wantErr bool
 	}{
 		{list: "", want: ""},
-		{list: "restart,delete", want: "restart,delete"},
-		{list: "delete, restart", want: "restart,delete"},
+		{list: "live,restart,delete", want: "live,restart,delete"},
+		{list: "delete, restart,live", want: "live,restart,delete"},
 		{list: "delete,delete", want: "delete"},
 		{list: "restart,,", want: "restart"},
 		{list: "restart,reboot", wantErr: true},
@@ -50,7 +50,13 @@ func TestEscalate(t *testing.T) {
 		tried []Tier
 		why   []string
 	}{
-		{name: "restart", tiers: "restart,delete", tried: []Tier{TierRestart}},
+		{name: "live", tiers: "live,restart,delete", tried: []Tier{TierLive}},
+		{name: "live without restarts", tiers: "live,restart,delete", policy: corev1.RestartPolicyNever, tried: []Tier{TierLive}},
+		{name: "live fails", tiers: "live,restart,delete", fail: []Tier{TierLive},
+			tried: []Tier{TierLive, TierRestart}, why: []string{"", "the live tier failed: boom"}},
+		{name: "live fails, restartPolicy", tiers: "live,restart,delete", policy: corev1.RestartPolicyOnFailure, fail: []Tier{TierLive},
+			tried: []Tier{TierLive, TierDelete}, why: []string{"", "the live tier failed: boom; restartPolicy OnFailure"}},
+		{name: "restart", tiers: "restart,delete", tried: []Tier{TierRestart}, why: []string{"the live tier is disabled"}},
 		{name: "restart fails", tiers: "restart,delete", fail: []Tier{TierRestart},
 			tried: []Tier{TierRestart, TierDelete}, why: []string{"", "the restart tier failed: boom"}},
 		{name: "restartPolicy", tiers: "restart,delete", policy: corev1.RestartPolicyOnFailure,
