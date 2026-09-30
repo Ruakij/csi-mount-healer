@@ -73,6 +73,17 @@ the binary drops every capability except `CAP_SYS_ADMIN`,
 The ClusterRole can read every secret: kubelet passes node stage and publish
 secrets to the driver, and the healer has to pass the same ones.
 
+## Events
+
+Every step shows as an event on the pod, from the `csi-mount-healer` component
+on its node:
+
+| Reason | Type | |
+|---|---|---|
+| `DeadMount` | Warning | a check failed, with the error and the strike count |
+| `Remounted` | Normal | a volume was mounted again through its driver |
+| `DeletingPod` | Warning | the fallback, with the reason a remount was not possible |
+
 ## Configuration
 
 | Flag | Environment | Default | |

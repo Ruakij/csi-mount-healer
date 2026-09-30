@@ -19,7 +19,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
 
@@ -60,6 +63,7 @@ type Healer struct {
 	cfg     Config
 	prober  *prober
 	pods    cache.Indexer
+	events  record.EventRecorder
 	strikes map[string]int
 	// mu serialises changes to mounts and guard flags, so a sweep never guards or
 	// releases a volume halfway through a remount.
@@ -114,6 +118,12 @@ func (h *Healer) Run(ctx context.Context) error {
 		return err
 	}
 	h.pods = informer.GetIndexer()
+	// Events on the pod, so what happened to it shows in kubectl describe and in
+	// whatever watches the cluster's events.
+	broadcaster := record.NewBroadcaster(record.WithContext(ctx))
+	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: h.cfg.KubeClient.CoreV1().Events("")})
+	defer broadcaster.Shutdown()
+	h.events = broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "csi-mount-healer", Host: h.cfg.NodeName})
 	factory.Start(ctx.Done())
 	defer factory.Shutdown()
 	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
@@ -235,6 +245,8 @@ func (h *Healer) scan(ctx context.Context) {
 		h.strikes[v.target]++
 		klog.Warningf("pod %s/%s volume %s: %s (strike %d/%d)",
 			pod.Namespace, pod.Name, filepath.Base(v.dir), reason, h.strikes[v.target], h.cfg.Strikes)
+		h.events.Eventf(pod, corev1.EventTypeWarning, "DeadMount", "Volume %s: %s (strike %d/%d)",
+			filepath.Base(v.dir), reason, h.strikes[v.target], h.cfg.Strikes)
 		if h.strikes[v.target] >= h.cfg.Strikes {
 			delete(h.strikes, v.target)
 			due[pod.UID] = append(due[pod.UID], v)
@@ -287,6 +299,7 @@ func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) {
 			return
 		}
 		klog.Infof("pod %s/%s: remounted volume %s", pod.Namespace, pod.Name, name)
+		h.events.Eventf(pod, corev1.EventTypeNormal, "Remounted", "Remounted volume %s through its CSI driver", name)
 		podVolumes[name] = true
 	}
 	if err := h.restartContainers(ctx, pod, podVolumes); err != nil {
@@ -301,6 +314,7 @@ func (h *Healer) deletePod(ctx context.Context, pod *corev1.Pod, reason string) 
 		opts.GracePeriodSeconds = &zero
 	}
 	klog.Warningf("deleting pod %s/%s: %s", pod.Namespace, pod.Name, reason)
+	h.events.Eventf(pod, corev1.EventTypeWarning, "DeletingPod", "Deleting the pod to heal its dead mount: %s", reason)
 	if err := h.cfg.KubeClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, opts); err != nil {
 		klog.Errorf("deleting pod %s/%s: %v", pod.Namespace, pod.Name, err)
 	}
