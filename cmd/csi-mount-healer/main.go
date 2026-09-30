@@ -1,0 +1,72 @@
+// Command csi-mount-healer watches the CSI mounts of the pods on its node and
+// mounts a dead one again through its CSI driver, falling back to deleting the
+// pod. It can also make the directory underneath each mount immutable, so a pod
+// never writes to the node disk while its mount is missing.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"path"
+	"syscall"
+	"time"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
+
+	"github.com/Ruakij/csi-mount-healer/internal/healer"
+)
+
+var (
+	// Set by the build process
+	version = "dev"
+)
+
+func main() {
+	var cfg healer.Config
+	var guard string
+
+	flag.StringVar(&cfg.NodeName, "node-name", os.Getenv("NODE_NAME"), "name of this node (default: $NODE_NAME)")
+	flag.StringVar(&cfg.KubeletRoot, "kubelet-root", "/var/lib/kubelet", "path to the kubelet directory, mounted at the same path as on the node")
+	flag.DurationVar(&cfg.Interval, "interval", 5*time.Minute, "time between two checks of every mount")
+	flag.IntVar(&cfg.Strikes, "strikes", 3, "checks in a row a mount has to fail before it is healed")
+	flag.DurationVar(&cfg.StatTimeout, "stat-timeout", 30*time.Second, "how long a stat may take before the mount counts as hung")
+	flag.BoolVar(&cfg.Remount, "remount", true, "remount a dead volume through its CSI driver before falling back to deleting the pod")
+	flag.StringVar(&guard, "guard", string(healer.GuardAlways), "make the directory underneath a mount immutable: always | remount | off")
+	flag.DurationVar(&cfg.GuardInterval, "guard-interval", 30*time.Second, "time between two passes guarding the mounts of new pods (guard=always)")
+	flag.StringVar(&cfg.CRIEndpoint, "cri-endpoint", "unix:///run/containerd/containerd.sock", "container runtime socket, used to restart containers after a remount")
+
+	showVersion := flag.Bool("version", false, "show version")
+
+	klog.InitFlags(nil)
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(path.Base(os.Args[0]), version)
+		return
+	}
+	cfg.Guard = healer.GuardMode(guard)
+
+	restConfig, err := rest.InClusterConfig()
+	if err != nil {
+		klog.Fatalf("failed to build in-cluster kubeconfig: %v", err)
+	}
+	if cfg.KubeClient, err = kubernetes.NewForConfig(restConfig); err != nil {
+		klog.Fatalf("failed to build kubernetes client: %v", err)
+	}
+
+	h, err := healer.New(cfg)
+	if err != nil {
+		klog.Fatalf("invalid configuration: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT)
+	defer stop()
+	if err := h.Run(ctx); err != nil {
+		klog.Fatalf("healer exited: %v", err)
+	}
+}
