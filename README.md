@@ -94,20 +94,20 @@ on its node:
 |---|---|---|
 | `DeadMount` | Warning | a mount failed `-strikes` checks in a row, with the error; healing starts |
 | `Remounted` | Normal | a volume was mounted again through its driver, or swapped into a running container that holds nothing on the dead mount, or released it before `-live-timeout` |
-| `Remounted` | Warning | a volume was swapped into a running container that still holds handles on the dead mount, with their count, the processes and the time it goes to the next tier |
-| `Escalating` | Warning | a container goes from the live tier to the next, with the reason |
+| `Remounted` | Warning | a volume was swapped into a running container that still holds handles on the dead mount, with their count, the processes and the time of its escalation |
+| `Escalating` | Warning | a container is escalated from the live tier to the next, with the reason |
 | `DeletingPod` | Warning | the delete tier, with the reason the tiers before it did not heal it |
 | `NotHealed` | Warning | no enabled tier was left, with the reasons |
 
 ## Heal tiers
 
 A dead volume goes to the first enabled tier that applies to its pod, least
-disruptive first, whatever the order in `-tiers`. When a tier fails, the volume
-goes on to the next enabled one. When none is left, the healer logs it and
+disruptive first, whatever the order in `-tiers`. When a tier fails, the volume is
+escalated to the next enabled one. When none is left, the healer logs it and
 records a `NotHealed` event, and does nothing more.
 
-The live tier works per container: a container it cannot swap goes on to the
-next tier right away, and so does one whose processes still hold handles on the
+The live tier works per container: a container it cannot swap is escalated to the
+next tier right away, and so is one whose processes still hold handles on the
 dead mount `-live-timeout` after the swap, with an `Escalating` event. Other
 containers of the pod keep their swap. A pod or container gone before then is
 left alone. With `-live-timeout=0`, a swapped container is never escalated,
@@ -132,7 +132,7 @@ in the log.
 | `-strikes` | `STRIKES` | `3` | failed checks in a row before a mount is healed |
 | `-stat-timeout` | `STAT_TIMEOUT` | `30s` | how long a `stat` may take before the mount counts as hung |
 | `-tiers` | `TIERS` | `live,restart,delete` | [heal tiers](#heal-tiers) to use; empty only reports |
-| `-live-timeout` | `LIVE_TIMEOUT` | `5m` | how long a container swapped by the live tier may hold handles on the dead mount before it goes to the next tier; `0` disables the escalation |
+| `-live-timeout` | `LIVE_TIMEOUT` | `5m` | how long a container swapped by the live tier may hold handles on the dead mount before it is escalated to the next tier; `0` disables the escalation |
 | `-guard` | `GUARD` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
 | `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | container runtime socket |
@@ -184,7 +184,7 @@ e.g. `-v=2`, which have no environment variables.
    and `map_files`, under the stat timeout. `ENOTCONN`, `ESTALE` or a hung
    `statx` count as a handle on the dead mount. The count runs right after the
    swap and, if anything is held, once more `-live-timeout` later, when the
-   container goes on to the next tier unless it released them.
+   container is escalated to the next tier unless it released them.
 8. The restart tier stops the running containers through the CRI instead.
    kubelet starts them again on the new mount.
 9. The delete tier deletes the pod with a UID precondition, so a pod recreated

@@ -40,7 +40,7 @@ type swap struct {
 }
 
 // live swaps the remounted volumes into the running containers that mount
-// them. A container it cannot swap goes on to the next tier on its own.
+// them. A container it cannot swap is escalated to the next tier on its own.
 func (h *Healer) live(ctx context.Context, pod *corev1.Pod, podVolumes map[string]string) error {
 	containers := containersUsing(pod, podVolumes)
 	if len(containers) == 0 {
@@ -113,8 +113,8 @@ func (h *Healer) swapContainer(ctx context.Context, rt runtimeapi.RuntimeService
 // next tier.
 func (h *Healer) escalateContainer(ctx context.Context, pod *corev1.Pod, name, why string) {
 	if to, _ := h.next(pod, TierRestart); to < tierCount {
-		klog.Warningf("pod %s/%s: container %s goes from the live tier to the %s tier: %s", pod.Namespace, pod.Name, name, to, why)
-		h.events.Eventf(pod, corev1.EventTypeWarning, "Escalating", "Container %s goes from the live tier to the %s tier: %s", name, to, why)
+		klog.Warningf("pod %s/%s: escalating container %s from the live tier to the %s tier: %s", pod.Namespace, pod.Name, name, to, why)
+		h.events.Eventf(pod, corev1.EventTypeWarning, "Escalating", "Escalating container %s from the live tier to the %s tier: %s", name, to, why)
 	}
 	h.escalate(pod, TierRestart, "container "+name+": "+why, func(t Tier, why string) error {
 		if t == TierDelete {
@@ -145,8 +145,8 @@ func (h *Healer) checkSwap(ctx context.Context, pod *corev1.Pod, s *swap) {
 			return
 		}
 		deadline := time.Now().Add(h.cfg.LiveTimeout)
-		h.events.Eventf(pod, corev1.EventTypeWarning, "Remounted", "Swapped volumes %s into running container %s, %s; it goes to the next tier at %s unless they are released",
-			volumes, s.container, held, deadline.Format(time.TimeOnly))
+		h.events.Eventf(pod, corev1.EventTypeWarning, "Remounted", "Swapped volumes %s into running container %s, %s; escalating at %s unless they are released",
+			volumes, s.container, held, deadline.Format("15:04:05 MST"))
 		// Nothing cancels the timer: a pod or container gone by then is found gone.
 		time.AfterFunc(h.cfg.LiveTimeout, func() { h.expireSwap(ctx, s) })
 	}
