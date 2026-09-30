@@ -216,7 +216,7 @@ func TestRemount(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "d"},
 		Spec:       storagev1.CSIDriverSpec{AttachRequired: ptr(false)},
 	})
-	h, err := New(Config{NodeName: "n", KubeletRoot: root, Strikes: 1, StatTimeout: 5 * time.Second, Remount: true, Guard: GuardAlways, KubeClient: client})
+	h, err := New(Config{NodeName: "n", KubeletRoot: root, Strikes: 1, StatTimeout: 5 * time.Second, Guard: GuardAlways, KubeClient: client})
 	if err != nil {
 		t.Fatal(err)
 	}

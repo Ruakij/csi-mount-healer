@@ -1,5 +1,5 @@
-// Package healer finds dead CSI mounts of the pods on this node and remounts them
-// through the CSI driver, or deletes the pod when that is not possible.
+// Package healer finds dead CSI mounts of the pods on this node and heals them
+// with the least disruptive of the enabled tiers that works.
 package healer
 
 import (
@@ -50,9 +50,7 @@ type Config struct {
 	// Strikes is how many checks in a row a mount has to fail before it is healed.
 	Strikes     int
 	StatTimeout time.Duration
-	// Remount asks the CSI driver to mount a dead volume again. Without it, or when
-	// that fails, the pod is deleted.
-	Remount     bool
+	Tiers       Tiers
 	Guard       GuardMode
 	CRIEndpoint string
 	// Selector picks the volumes to check, heal and guard. It matches the labels
@@ -138,8 +136,8 @@ func (h *Healer) Run(ctx context.Context) error {
 	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 		return ctx.Err()
 	}
-	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, remount %v, guard %s, selector %q",
-		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Remount, h.cfg.Guard, h.cfg.Selector)
+	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, tiers %q, guard %s, selector %q",
+		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.Guard, h.cfg.Selector)
 
 	// Also clears what a previous run in another mode left behind.
 	h.sweep("*")
@@ -295,35 +293,38 @@ func deadReason(pod *corev1.Pod, mounted bool, err error) string {
 }
 
 func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) {
-	switch {
-	case pod.DeletionTimestamp != nil:
-		h.deletePod(ctx, pod, "it is stuck terminating on a dead mount")
-		return
-	case !h.cfg.Remount:
-		h.deletePod(ctx, pod, "remounting is disabled")
-		return
-	case pod.Spec.RestartPolicy != corev1.RestartPolicyAlways:
-		// Its containers would not come back after being stopped for the remount.
-		h.deletePod(ctx, pod, "a remount needs its containers restarted, which restartPolicy "+string(pod.Spec.RestartPolicy)+" does not do")
-		return
+	from, why := Tier(0), ""
+	if pod.DeletionTimestamp != nil {
+		from, why = TierDelete, "it is stuck terminating on a dead mount"
 	}
+	h.escalate(pod, from, why, func(t Tier, why string) error {
+		if t == TierDelete {
+			return h.deletePod(ctx, pod, why)
+		}
+		return h.restart(ctx, pod, vols)
+	})
+}
+
+// restart remounts the volumes and stops the containers that use them, for
+// kubelet to start them again on the new mounts.
+func (h *Healer) restart(ctx context.Context, pod *corev1.Pod, vols []volume) error {
 	podVolumes := map[string]bool{}
 	for _, v := range vols {
 		name, err := h.remount(ctx, pod, v)
 		if err != nil {
-			h.deletePod(ctx, pod, fmt.Sprintf("remounting %s failed: %v", filepath.Base(v.dir), err))
-			return
+			return fmt.Errorf("remounting %s: %w", filepath.Base(v.dir), err)
 		}
 		klog.Infof("pod %s/%s: remounted volume %s", pod.Namespace, pod.Name, name)
 		h.events.Eventf(pod, corev1.EventTypeNormal, "Remounted", "Remounted volume %s through its CSI driver", name)
 		podVolumes[name] = true
 	}
 	if err := h.restartContainers(ctx, pod, podVolumes); err != nil {
-		h.deletePod(ctx, pod, fmt.Sprintf("restarting its containers failed: %v", err))
+		return fmt.Errorf("restarting its containers: %w", err)
 	}
+	return nil
 }
 
-func (h *Healer) deletePod(ctx context.Context, pod *corev1.Pod, reason string) {
+func (h *Healer) deletePod(ctx context.Context, pod *corev1.Pod, reason string) error {
 	opts := metav1.DeleteOptions{Preconditions: metav1.NewUIDPreconditions(string(pod.UID))}
 	if pod.DeletionTimestamp != nil {
 		zero := int64(0)
@@ -331,9 +332,7 @@ func (h *Healer) deletePod(ctx context.Context, pod *corev1.Pod, reason string) 
 	}
 	klog.Warningf("deleting pod %s/%s: %s", pod.Namespace, pod.Name, reason)
 	h.events.Eventf(pod, corev1.EventTypeWarning, "DeletingPod", "Deleting the pod to heal its dead mount: %s", reason)
-	if err := h.cfg.KubeClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, opts); err != nil {
-		klog.Errorf("deleting pod %s/%s: %v", pod.Namespace, pod.Name, err)
-	}
+	return h.cfg.KubeClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, opts)
 }
 
 func active(pod *corev1.Pod) bool {
