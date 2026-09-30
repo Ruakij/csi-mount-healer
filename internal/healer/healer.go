@@ -304,7 +304,7 @@ func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) {
 		return
 	case pod.Spec.RestartPolicy != corev1.RestartPolicyAlways:
 		// Its containers would not come back after being stopped for the remount.
-		h.deletePod(ctx, pod, "restartPolicy is "+string(pod.Spec.RestartPolicy))
+		h.deletePod(ctx, pod, "a remount needs its containers restarted, which restartPolicy "+string(pod.Spec.RestartPolicy)+" does not do")
 		return
 	}
 	podVolumes := map[string]bool{}
