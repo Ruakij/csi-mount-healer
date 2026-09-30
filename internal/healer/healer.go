@@ -267,9 +267,9 @@ func (h *Healer) scan(ctx context.Context) {
 		h.strikes[v.target]++
 		klog.Warningf("pod %s/%s volume %s: %s (strike %d/%d)",
 			pod.Namespace, pod.Name, filepath.Base(v.dir), reason, h.strikes[v.target], h.cfg.Strikes)
-		h.events.Eventf(pod, corev1.EventTypeWarning, "DeadMount", "Volume %s: %s (strike %d/%d)",
-			filepath.Base(v.dir), reason, h.strikes[v.target], h.cfg.Strikes)
 		if h.strikes[v.target] >= h.cfg.Strikes {
+			h.events.Eventf(pod, corev1.EventTypeWarning, "DeadMount", "Volume %s: %s, %d checks in a row",
+				filepath.Base(v.dir), reason, h.cfg.Strikes)
 			delete(h.strikes, v.target)
 			due[pod.UID] = append(due[pod.UID], v)
 		}
