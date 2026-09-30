@@ -89,7 +89,9 @@ func (h *Healer) remount(ctx context.Context, pod *corev1.Pod, v volume) (string
 
 	// kubelet reuses a subPath bind that still exists, and this one points into
 	// the dead mount. Without it, kubelet binds the new mount on container start.
-	subpaths, _ := filepath.Glob(filepath.Join(h.cfg.KubeletRoot, "pods", string(pod.UID), "volume-subpaths", reqs.podVolume, "*", "*"))
+	// kubelet names the directory after the inner volume spec name, the PV name
+	// for a PVC, as it does the volume directory.
+	subpaths, _ := filepath.Glob(filepath.Join(h.cfg.KubeletRoot, "pods", string(pod.UID), "volume-subpaths", filepath.Base(v.dir), "*", "*"))
 	for _, p := range subpaths {
 		if err := detach(p); err != nil {
 			return "", fmt.Errorf("detaching subPath %s: %w", p, err)

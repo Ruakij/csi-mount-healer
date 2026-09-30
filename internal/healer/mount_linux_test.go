@@ -200,7 +200,7 @@ func TestRemount(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "vol_data.json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	subpath := filepath.Join(root, "pods", string(pod.UID), "volume-subpaths", "data", "app", "0")
+	subpath := filepath.Join(root, "pods", string(pod.UID), "volume-subpaths", pv.Name, "app", "0")
 	mountTmpfs(t, subpath)
 	staging := stagingPath(root, "d", "h")
 	if err := os.MkdirAll(staging, 0o750); err != nil {
