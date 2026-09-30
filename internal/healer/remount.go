@@ -13,7 +13,9 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -32,17 +34,18 @@ func (h *Healer) remount(ctx context.Context, pod *corev1.Pod, v volume) (string
 	if err != nil {
 		return "", err
 	}
-	conn, err := h.dialDriver(ctx, data.DriverName)
+	conn, caps, err := h.reachDriver(ctx, data.DriverName)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
 	node := csi.NewNodeClient(conn)
 
-	in, err := h.inputs(ctx, pod, v, data, node)
+	in, err := h.inputs(ctx, pod, v, data)
 	if err != nil {
 		return "", err
 	}
+	in.caps = caps
 	reqs, err := buildRequests(in)
 	if err != nil {
 		return "", err
@@ -148,12 +151,9 @@ func (h *Healer) verify(path string) error {
 }
 
 // inputs looks up what kubelet looks up before it calls the driver.
-func (h *Healer) inputs(ctx context.Context, pod *corev1.Pod, v volume, data volData, node csi.NodeClient) (requestInputs, error) {
+func (h *Healer) inputs(ctx context.Context, pod *corev1.Pod, v volume, data volData) (requestInputs, error) {
 	in := requestInputs{pod: pod, vol: data, target: v.target, kubeletDir: h.cfg.KubeletRoot}
 	var err error
-	if in.caps, err = nodeCapabilities(ctx, node); err != nil {
-		return in, err
-	}
 	api := h.cfg.KubeClient
 	if in.driver, err = api.StorageV1().CSIDrivers().Get(ctx, data.DriverName, metav1.GetOptions{}); err != nil {
 		return in, err
@@ -210,7 +210,7 @@ func (h *Healer) secret(ctx context.Context, namespace, name string) (map[string
 
 func nodeCapabilities(ctx context.Context, node csi.NodeClient) (nodeCaps, error) {
 	var caps nodeCaps
-	cctx, cancel := context.WithTimeout(ctx, csiTimeout)
+	cctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	resp, err := node.NodeGetCapabilities(cctx, &csi.NodeGetCapabilitiesRequest{})
 	if err != nil {
@@ -246,7 +246,57 @@ func (h *Healer) dialDriver(ctx context.Context, name string) (*grpc.ClientConn,
 			return dial(info.Endpoint)
 		}
 	}
-	return nil, fmt.Errorf("driver %s is not registered with kubelet on this node", name)
+	return nil, fmt.Errorf("driver %s %w", name, errNotRegistered)
+}
+
+var (
+	errNotRegistered = errors.New("is not registered with kubelet on this node")
+	errDriverDown    = errors.New("the CSI driver cannot be reached")
+)
+
+// probeTimeout bounds the calls that only ask a socket who it is, which any
+// running driver answers at once.
+const probeTimeout = 10 * time.Second
+
+// Attempts to reach a driver before it counts as down, so a driver in the
+// middle of a restart does not.
+var driverAttempts, driverRetryDelay = 3, 10 * time.Second
+
+// reachDriver connects to a CSI driver and asks for its node capabilities. A
+// driver that is not registered, refuses the connection or does not answer is
+// tried again, and after the last attempt counts as down, wrapping
+// errDriverDown, for the rest of the scan.
+func (h *Healer) reachDriver(ctx context.Context, name string) (*grpc.ClientConn, nodeCaps, error) {
+	if err := h.down[name]; err != nil {
+		return nil, nodeCaps{}, err
+	}
+	var err error
+	for attempt := range driverAttempts {
+		if attempt > 0 {
+			klog.V(2).Infof("driver %s: %v, trying again in %v", name, err, driverRetryDelay)
+			select {
+			case <-ctx.Done():
+				return nil, nodeCaps{}, ctx.Err()
+			case <-time.After(driverRetryDelay):
+			}
+		}
+		var conn *grpc.ClientConn
+		if conn, err = h.dialDriver(ctx, name); err == nil {
+			var caps nodeCaps
+			if caps, err = nodeCapabilities(ctx, csi.NewNodeClient(conn)); err == nil {
+				return conn, caps, nil
+			}
+			conn.Close()
+		}
+		if code := status.Code(err); !errors.Is(err, errNotRegistered) && code != codes.Unavailable && code != codes.DeadlineExceeded {
+			return nil, nodeCaps{}, err
+		}
+	}
+	err = fmt.Errorf("%w: %w", errDriverDown, err)
+	if h.down != nil {
+		h.down[name] = err
+	}
+	return nil, nodeCaps{}, err
 }
 
 func pluginInfo(ctx context.Context, sock string) (*registerapi.PluginInfo, error) {
@@ -255,7 +305,7 @@ func pluginInfo(ctx context.Context, sock string) (*registerapi.PluginInfo, erro
 		return nil, err
 	}
 	defer conn.Close()
-	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	return registerapi.NewRegistrationClient(conn).GetInfo(cctx, &registerapi.InfoRequest{})
 }

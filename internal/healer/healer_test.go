@@ -1,17 +1,23 @@
 package healer
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/record"
 )
 
 func TestDeadReason(t *testing.T) {
@@ -102,5 +108,61 @@ func TestSelected(t *testing.T) {
 	h, _ := New(Config{NodeName: "n", Strikes: 1, Guard: GuardOff, Selector: sel})
 	if h.selected(pod, volume{dir: t.TempDir()}) {
 		t.Error("volume without vol_data.json matched a driver selector")
+	}
+}
+
+// A driver that is not registered counts as down after every attempt, and heals
+// again at the next check unless DeleteOnDriverDown escalates it.
+func TestHealDriverDown(t *testing.T) {
+	attempts, delay := driverAttempts, driverRetryDelay
+	driverAttempts, driverRetryDelay = 2, time.Millisecond
+	t.Cleanup(func() { driverAttempts, driverRetryDelay = attempts, delay })
+
+	for _, deleteOnDown := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delete on driver down %v", deleteOnDown), func(t *testing.T) {
+			root := t.TempDir()
+			pod := testPod()
+			pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
+			pod.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "app"}}
+			dir := filepath.Join(root, "pods", string(pod.UID), "volumes", "kubernetes.io~csi", "pv-1")
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(volData{SpecVolID: "pv-1", VolumeHandle: "h", DriverName: "d"})
+			if err := os.WriteFile(filepath.Join(dir, "vol_data.json"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			client := fake.NewClientset(pod)
+			events := record.NewFakeRecorder(10)
+			h := &Healer{cfg: Config{KubeletRoot: root, KubeClient: client, DeleteOnDriverDown: deleteOnDown}, events: events, down: map[string]error{}}
+			if err := h.cfg.Tiers.Set("live,restart,delete"); err != nil {
+				t.Fatal(err)
+			}
+
+			healed := h.heal(context.Background(), pod, []volume{{podUID: pod.UID, dir: dir, target: filepath.Join(dir, "mount")}})
+
+			if healed != deleteOnDown {
+				t.Errorf("healed = %v, want %v", healed, deleteOnDown)
+			}
+			if !errors.Is(h.down["d"], errDriverDown) {
+				t.Errorf("driver d not recorded as down: %v", h.down["d"])
+			}
+			close(events.Events)
+			var got []string
+			for e := range events.Events {
+				got = append(got, strings.Fields(e)[1])
+			}
+			want := "DriverDown"
+			if deleteOnDown {
+				want = "DeletingPod"
+			}
+			if strings.Join(got, ",") != want {
+				t.Errorf("events %v, want %s", got, want)
+			}
+			_, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+			if deleted := err != nil; deleted != deleteOnDown {
+				t.Errorf("pod deleted = %v, want %v", deleted, deleteOnDown)
+			}
+		})
 	}
 }

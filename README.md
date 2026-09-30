@@ -98,6 +98,7 @@ on its node:
 | `Remounted` | Warning | a volume was swapped into a running container that still holds handles on the dead mount, with their count, the processes and the time of its escalation |
 | `Escalating` | Warning | a container is escalated from the live tier to the next, with the reason |
 | `DeletingPod` | Warning | the delete tier, with the reason the tiers before it did not heal it |
+| `DriverDown` | Warning | the driver of a dead volume cannot be reached, healing again at the next check; counted on one event while it stays down |
 | `NotHealed` | Warning | no enabled tier was left, with the reasons |
 
 ## Heal tiers
@@ -106,6 +107,16 @@ A dead volume goes to the first enabled tier that applies to its pod, least
 disruptive first, whatever the order in `-tiers`. When a tier fails, the volume is
 escalated to the next enabled one. When none is left, the healer logs it and
 records a `NotHealed` event, and does nothing more.
+
+Every tier but `delete` needs the driver to remount the volume. A driver that is
+not registered with kubelet, refuses the connection or does not answer within
+10 seconds is tried 3 times, 10 seconds apart, so a driver restart in progress
+is waited out. Still unreachable, it counts as down for the rest of the check,
+and by default the volume is healed again at the next check, with a `DriverDown`
+event: the pod keeps running, and when the driver is back the live tier keeps
+its processes. With `-delete-on-driver-down`, the volume is escalated instead,
+which ends at the delete tier; the new pod waits in `ContainerCreating` until
+the driver is back, so the app is stopped rather than running on a dead mount.
 
 The live tier works per container: a container it cannot swap is escalated to the
 next tier right away, and so is one whose processes still hold handles on the
@@ -137,7 +148,9 @@ missing fails every write with `EPERM`.
 | Processes still hold the dead mount after `-live-timeout` | the container is restarted, with `restartPolicy: Always`; else the pod is deleted, if a controller recreates it; else nothing more | as above, then `Escalating`, and `DeletingPod` or `NotHealed` |
 | The same, with `-live-timeout=0` | the container keeps running with the new mount; what it holds on the dead one stays broken | as above, without the escalation |
 | A container cannot be swapped (`subPathExpr`, a mount below the mount path, a failed swap) | the container is restarted, or the pod deleted, as above | `DeadMount`, `Remounted` (driver), `Escalating`, then as above |
-| The driver cannot remount, e.g. it is down | `live` and `restart` fail, the pod is deleted if a controller recreates it; its new pod waits in `ContainerCreating` until the driver is back | `DeadMount`, `DeletingPod` or `NotHealed` |
+| The driver cannot be reached after 3 attempts | healed again at every following check while the mount stays dead | `DeadMount`, `DriverDown` |
+| The same, with `-delete-on-driver-down` | the pod is deleted if a controller recreates it; its new pod waits in `ContainerCreating` until the driver is back | `DeadMount`, `DeletingPod` or `NotHealed` |
+| The driver is reached but the remount fails | `live` and `restart` fail, the pod is deleted if a controller recreates it | `DeadMount`, `DeletingPod` or `NotHealed` |
 | The pod has no controller and no other tier heals it | nothing, the pod stays as it is | `DeadMount`, `NotHealed` |
 | The pod is stuck terminating on a dead mount | the pod is force deleted | `DeadMount`, `DeletingPod` |
 | The pod or container is gone before `-live-timeout` | nothing | none further |
@@ -154,6 +167,7 @@ missing fails every write with `EPERM`.
 | `-stat-timeout` | `STAT_TIMEOUT` | `30s` | how long a `stat` may take before the mount counts as hung |
 | `-tiers` | `TIERS` | `live,restart,delete` | [heal tiers](#heal-tiers) to use; empty only reports |
 | `-live-timeout` | `LIVE_TIMEOUT` | `1m` | how long a container swapped by the live tier may hold handles on the dead mount before it is escalated to the next tier; `0` disables the escalation |
+| `-delete-on-driver-down` | `DELETE_ON_DRIVER_DOWN` | `false` | escalate a dead volume whose driver cannot be reached, which ends at the delete tier, instead of healing it again at the next check |
 | `-guard` | `GUARD` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
 | `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | container runtime socket |
