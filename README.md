@@ -91,7 +91,7 @@ on its node:
 
 | Reason | Type | |
 |---|---|---|
-| `DeadMount` | Warning | a check failed, with the error and the strike count |
+| `DeadMount` | Warning | a mount failed `-strikes` checks in a row, with the error; healing starts |
 | `Remounted` | Normal | a volume was mounted again through its driver, or swapped into a running container that holds nothing on the dead mount, or released it before `-live-timeout` |
 | `Remounted` | Warning | a volume was swapped into a running container that still holds handles on the dead mount, with their count, the processes and the time it goes to the next tier |
 | `Escalating` | Warning | a container goes from the live tier to the next, with the reason |
