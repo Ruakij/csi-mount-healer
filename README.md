@@ -1,5 +1,6 @@
 # csi-mount-healer
 
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.26%2B-326CE5?logo=kubernetes&logoColor=white)](#requirements)
 [![Linux](https://img.shields.io/badge/Linux-5.8%2B-FCC624?logo=linux&logoColor=black)](#requirements)
 
 **Remounts dead CSI volumes of running pods through their CSI driver, and keeps
