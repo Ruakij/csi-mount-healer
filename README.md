@@ -129,11 +129,11 @@ in the log.
 |---|---|---|---|
 | `-node-name` | `NODE_NAME` | | node to watch |
 | `-kubelet-root` | `KUBELET_ROOT` | `/var/lib/kubelet` | kubelet directory, mounted at the same path as on the node |
-| `-interval` | `INTERVAL` | `5m` | time between two checks of every mount |
+| `-interval` | `INTERVAL` | `1m` | time between two checks of every mount |
 | `-strikes` | `STRIKES` | `3` | failed checks in a row before a mount is healed |
 | `-stat-timeout` | `STAT_TIMEOUT` | `30s` | how long a `stat` may take before the mount counts as hung |
 | `-tiers` | `TIERS` | `live,restart,delete` | [heal tiers](#heal-tiers) to use; empty only reports |
-| `-live-timeout` | `LIVE_TIMEOUT` | `5m` | how long a container swapped by the live tier may hold handles on the dead mount before it is escalated to the next tier; `0` disables the escalation |
+| `-live-timeout` | `LIVE_TIMEOUT` | `1m` | how long a container swapped by the live tier may hold handles on the dead mount before it is escalated to the next tier; `0` disables the escalation |
 | `-guard` | `GUARD` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
 | `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | container runtime socket |
