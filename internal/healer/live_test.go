@@ -19,7 +19,9 @@ func TestCheckSwap(t *testing.T) {
 		handles int
 		err     error
 		age     time.Duration
-		podGone bool
+		// reported is the count a previous check reported.
+		reported int
+		podGone  bool
 		// events are the reasons recorded, in order.
 		events  []string
 		kept    bool
@@ -27,8 +29,12 @@ func TestCheckSwap(t *testing.T) {
 	}{
 		{name: "nothing held", events: []string{"Remounted"}},
 		{name: "held", handles: 2, age: time.Minute, events: []string{"StaleHandles"}, kept: true},
-		{name: "held too long", handles: 2, age: 5 * time.Minute,
-			events: []string{"StaleHandles", "Escalating", "DeletingPod"}, deleted: true},
+		{name: "held, count reported", handles: 2, reported: 2, age: 2 * time.Minute, kept: true},
+		{name: "held, count changed", handles: 1, reported: 2, age: 2 * time.Minute, events: []string{"StaleHandles"}, kept: true},
+		{name: "held too long", handles: 2, reported: 2, age: 5 * time.Minute,
+			events: []string{"Escalating", "DeletingPod"}, deleted: true},
+		{name: "held until the check nearest the timeout", handles: 2, reported: 2, age: 5*time.Minute - 10*time.Second,
+			events: []string{"Escalating", "DeletingPod"}, deleted: true},
 		{name: "container gone", err: errGone},
 		{name: "pod gone", handles: 2, age: time.Hour, podGone: true},
 	}
@@ -43,7 +49,7 @@ func TestCheckSwap(t *testing.T) {
 			client := fake.NewClientset(pod)
 			events := record.NewFakeRecorder(10)
 			h := &Healer{
-				cfg:    Config{LiveTimeout: 5 * time.Minute, KubeClient: client},
+				cfg:    Config{Interval: time.Minute, LiveTimeout: 5 * time.Minute, KubeClient: client},
 				pods:   pods,
 				events: events,
 				swaps:  map[string]*swap{},
@@ -55,7 +61,7 @@ func TestCheckSwap(t *testing.T) {
 			if err := h.cfg.Tiers.Set("live,delete"); err != nil {
 				t.Fatal(err)
 			}
-			h.swaps["k"] = &swap{pod: pod.UID, container: "app", volumes: []string{"data"}, since: time.Now().Add(-tt.age)}
+			h.swaps["k"] = &swap{pod: pod.UID, container: "app", volumes: []string{"data"}, since: time.Now().Add(-tt.age), handles: tt.reported}
 
 			h.checkSwaps(context.Background())
 

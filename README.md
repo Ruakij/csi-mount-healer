@@ -93,7 +93,7 @@ on its node:
 |---|---|---|
 | `DeadMount` | Warning | a check failed, with the error and the strike count |
 | `Remounted` | Normal | a volume was mounted again through its driver, or swapped into a running container that holds nothing on the dead mount |
-| `StaleHandles` | Warning | a swapped container still holds handles on the dead mount, with their count and the processes; repeated every check |
+| `StaleHandles` | Warning | a swapped container still holds handles on the dead mount, with their count and the processes; again whenever the count changes |
 | `Escalating` | Warning | a container goes from the live tier to the next, with the reason |
 | `DeletingPod` | Warning | the delete tier, with the reason the tiers before it did not heal it |
 | `NotHealed` | Warning | no enabled tier was left, with the reasons |

@@ -38,6 +38,8 @@ type swap struct {
 	ns    uint64
 	dead  map[uint64]bool
 	since time.Time
+	// handles is the count last reported in an event.
+	handles int
 }
 
 // live swaps the remounted volumes into the running containers that mount
@@ -154,11 +156,17 @@ func (h *Healer) checkSwap(ctx context.Context, key string, s *swap) {
 			strings.Join(s.volumes, ", "), s.container)
 	default:
 		klog.Warningf("pod %s/%s: container %s holds %d handles on its dead mounts: %s", pod.Namespace, pod.Name, s.container, n, strings.Join(procs, ", "))
-		h.events.Eventf(pod, corev1.EventTypeWarning, "StaleHandles", "Container %s holds %d handles on the dead mounts of volumes %s: %s",
-			s.container, n, strings.Join(s.volumes, ", "), strings.Join(procs, ", "))
-		if time.Since(s.since) >= h.cfg.LiveTimeout {
+		// Checks run once per interval, so the timeout ends at the check nearest to
+		// it rather than one interval late.
+		if time.Until(s.since.Add(h.cfg.LiveTimeout)) < h.cfg.Interval/2 {
 			delete(h.swaps, key)
-			h.escalateContainer(ctx, pod, s.container, fmt.Sprintf("%d handles still on the dead mounts after %v", n, h.cfg.LiveTimeout))
+			h.escalateContainer(ctx, pod, s.container, fmt.Sprintf("%d handles still on the dead mounts after %v: %s", n, h.cfg.LiveTimeout, strings.Join(procs, ", ")))
+			return
+		}
+		if n != s.handles {
+			s.handles = n
+			h.events.Eventf(pod, corev1.EventTypeWarning, "StaleHandles", "Container %s holds %d handles on the dead mounts of volumes %s: %s",
+				s.container, n, strings.Join(s.volumes, ", "), strings.Join(procs, ", "))
 		}
 	}
 }

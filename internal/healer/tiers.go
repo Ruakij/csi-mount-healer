@@ -65,7 +65,7 @@ func (h *Healer) next(pod *corev1.Pod, from Tier) (Tier, []string) {
 		case !h.cfg.Tiers.has(t):
 			skipped = append(skipped, "the "+t.String()+" tier is disabled")
 		case t == TierRestart && pod.Spec.RestartPolicy != corev1.RestartPolicyAlways:
-			skipped = append(skipped, "restartPolicy "+string(pod.Spec.RestartPolicy)+" does not start the containers the restart tier stops again")
+			skipped = append(skipped, "the restart tier needs restartPolicy Always, the pod has "+string(pod.Spec.RestartPolicy))
 		default:
 			return t, skipped
 		}
