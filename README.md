@@ -44,6 +44,8 @@ directory immutable, so such a container gets `EPERM` on its first write instead
 
 ## Requirements
 
+- Kubernetes 1.26 or newer, for the fsGroup kubelet hands to CSI drivers with
+  `VOLUME_MOUNT_GROUP`. Tested on 1.37.
 - Linux 5.8 or newer (`statx` mount root, `open_tree`).
 - A filesystem under `/var/lib/kubelet` that supports the immutable flag (ext4,
   xfs, btrfs, zfs, ...), for the guard.
