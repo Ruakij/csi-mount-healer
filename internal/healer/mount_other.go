@@ -14,3 +14,5 @@ func stat(string) (bool, error) { return false, errUnsupported }
 func detach(string) error { return errUnsupported }
 
 func setImmutable(string, bool) error { return errUnsupported }
+
+func DropPrivileges() error { return errUnsupported }

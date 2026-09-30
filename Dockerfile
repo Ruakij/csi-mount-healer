@@ -13,5 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
 # The binary is static, so the image needs nothing else: no shell or tools for
 # anyone who gets code execution in this privileged container.
 FROM scratch
+# Binary needs root for mount-access on kubelets-dir aswell as setting the immutable
+USER 0:0
 COPY --from=build /out/csi-mount-healer /csi-mount-healer
 ENTRYPOINT ["/csi-mount-healer"]

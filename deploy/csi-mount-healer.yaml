@@ -63,10 +63,11 @@ spec:
             - name: CRI_ENDPOINT
               value: unix:///run/containerd/containerd.sock
           securityContext:
-            # Unmounting and setting the immutable flag need CAP_SYS_ADMIN and
-            # CAP_LINUX_IMMUTABLE on the host's mounts; Bidirectional propagation
-            # requires privileged.
+            # Bidirectional propagation requires privileged, which grants every
+            # capability and ignores capabilities.drop; the binary drops all but
+            # CAP_SYS_ADMIN and CAP_LINUX_IMMUTABLE itself at startup.
             privileged: true
+            readOnlyRootFilesystem: true
           resources:
             requests:
               cpu: 10m

@@ -52,6 +52,9 @@ func main() {
 		fmt.Println(path.Base(os.Args[0]), version)
 		return
 	}
+	if err := healer.DropPrivileges(); err != nil {
+		klog.Fatalf("dropping privileges: %v", err)
+	}
 	cfg.Guard = healer.GuardMode(guard)
 
 	restConfig, err := rest.InClusterConfig()
