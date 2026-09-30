@@ -65,7 +65,8 @@ spec:
           securityContext:
             # Bidirectional propagation requires privileged, which grants every
             # capability and ignores capabilities.drop; the binary drops all but
-            # CAP_SYS_ADMIN and CAP_LINUX_IMMUTABLE itself at startup.
+            # CAP_SYS_ADMIN, CAP_LINUX_IMMUTABLE and CAP_DAC_READ_SEARCH itself at
+            # startup.
             privileged: true
             readOnlyRootFilesystem: true
           resources:

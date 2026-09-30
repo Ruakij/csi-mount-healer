@@ -64,8 +64,9 @@ On k3s, point `CRI_ENDPOINT` and the `cri` hostPath at
 `/run/k3s/containerd/containerd.sock`.
 
 The container is privileged, as Bidirectional mount propagation requires, but
-the binary drops every capability except `CAP_SYS_ADMIN` and
-`CAP_LINUX_IMMUTABLE` at startup and sets `no_new_privs`.
+the binary drops every capability except `CAP_SYS_ADMIN`,
+`CAP_LINUX_IMMUTABLE` and `CAP_DAC_READ_SEARCH` at startup and sets
+`no_new_privs`.
 
 The ClusterRole can read every secret: kubelet passes node stage and publish
 secrets to the driver, and the healer has to pass the same ones.

@@ -12,10 +12,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// keptCaps are all the healer uses: unmounting and open_tree (CAP_SYS_ADMIN) and
-// the guard (CAP_LINUX_IMMUTABLE). Everything else it touches is owned by root:
-// the kubelet directory, the CSI and CRI sockets.
-var keptCaps = []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_LINUX_IMMUTABLE}
+// keptCaps are all the healer uses: unmounting and open_tree (CAP_SYS_ADMIN), the
+// guard (CAP_LINUX_IMMUTABLE), and opening the directory underneath a mount for
+// the guard, which the pod may own with a mode that locks root out
+// (CAP_DAC_READ_SEARCH). Everything else it touches is owned by root: the kubelet
+// directory, the CSI and CRI sockets.
+var keptCaps = []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_LINUX_IMMUTABLE, unix.CAP_DAC_READ_SEARCH}
 
 // capsHeader and capsData stay at a fixed address while the kernel reads them.
 var (

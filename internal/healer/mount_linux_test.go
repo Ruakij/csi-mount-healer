@@ -90,6 +90,11 @@ func TestStat(t *testing.T) {
 
 func TestGuard(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "mount")
+	// No access for the healer without DAC capabilities, as a directory a container
+	// chowned to its own user.
+	if err := os.Mkdir(target, 0); err != nil {
+		t.Fatal(err)
+	}
 	mountTmpfs(t, target)
 
 	if err := setImmutable(target, true); err != nil {
@@ -111,6 +116,9 @@ func TestGuard(t *testing.T) {
 	}
 
 	if err := setImmutable(target, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(target, "on-disk"), nil, 0o644); err != nil {
