@@ -125,7 +125,7 @@ func (h *Healer) escalateContainer(ctx context.Context, pod *corev1.Pod, name, w
 }
 
 // checkSwap reports whether a swapped container still holds handles on its
-// dead mounts, and gives it until LiveTimeout to release them.
+// dead mounts, and gives it until LiveTimeout to release them, or forever for 0.
 func (h *Healer) checkSwap(ctx context.Context, pod *corev1.Pod, s *swap) {
 	n, procs, err := h.stale(s)
 	volumes := strings.Join(s.volumes, ", ")
@@ -138,8 +138,13 @@ func (h *Healer) checkSwap(ctx context.Context, pod *corev1.Pod, s *swap) {
 		if err == nil {
 			held = fmt.Sprintf("%d handles held on the dead mounts: %s", n, strings.Join(procs, ", "))
 		}
-		deadline := time.Now().Add(h.cfg.LiveTimeout)
 		klog.Warningf("pod %s/%s: container %s: %s", pod.Namespace, pod.Name, s.container, held)
+		if h.cfg.LiveTimeout == 0 {
+			h.events.Eventf(pod, corev1.EventTypeWarning, "Remounted", "Swapped volumes %s into running container %s, %s; not escalating, the live timeout is 0",
+				volumes, s.container, held)
+			return
+		}
+		deadline := time.Now().Add(h.cfg.LiveTimeout)
 		h.events.Eventf(pod, corev1.EventTypeWarning, "Remounted", "Swapped volumes %s into running container %s, %s; it goes to the next tier at %s unless they are released",
 			volumes, s.container, held, deadline.Format(time.TimeOnly))
 		// Nothing cancels the timer: a pod or container gone by then is found gone.

@@ -52,7 +52,7 @@ type Config struct {
 	StatTimeout time.Duration
 	Tiers       Tiers
 	// LiveTimeout is how long a container swapped by the live tier may hold on to
-	// the dead mount before it goes on to the next tier.
+	// the dead mount before it goes on to the next tier; 0 disables that.
 	LiveTimeout time.Duration
 	Guard       GuardMode
 	CRIEndpoint string
@@ -88,6 +88,9 @@ func New(cfg Config) (*Healer, error) {
 	}
 	if cfg.Strikes < 1 {
 		return nil, errors.New("strikes must be at least 1")
+	}
+	if cfg.LiveTimeout < 0 {
+		return nil, errors.New("live timeout must not be negative")
 	}
 	if cfg.Selector == nil {
 		cfg.Selector = labels.Everything()
