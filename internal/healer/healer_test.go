@@ -10,7 +10,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -115,10 +114,6 @@ func TestSelected(t *testing.T) {
 // up, counted per class: a driver that is not registered, and one reached that
 // cannot remount, here for want of vol_data.json.
 func TestHealAttempts(t *testing.T) {
-	attempts, delay := driverAttempts, driverRetryDelay
-	driverAttempts, driverRetryDelay = 2, time.Millisecond
-	t.Cleanup(func() { driverAttempts, driverRetryDelay = attempts, delay })
-
 	tests := []struct {
 		name     string
 		down     bool

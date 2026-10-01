@@ -268,39 +268,24 @@ var (
 // running driver answers at once.
 const probeTimeout = 10 * time.Second
 
-// Attempts to reach a driver before it counts as down, so a driver in the
-// middle of a restart does not.
-var driverAttempts, driverRetryDelay = 3, 10 * time.Second
-
 // reachDriver connects to a CSI driver and asks for its node capabilities. A
-// driver that is not registered, refuses the connection or does not answer is
-// tried again, and after the last attempt counts as down, wrapping
-// errDriverDown, for the rest of the scan.
+// driver that is not registered, refuses the connection or does not answer
+// counts as down, wrapping errDriverDown, for the rest of the scan; the next
+// check tries it again.
 func (h *Healer) reachDriver(ctx context.Context, name string) (*grpc.ClientConn, nodeCaps, error) {
 	if err := h.down[name]; err != nil {
 		return nil, nodeCaps{}, err
 	}
-	var err error
-	for attempt := range driverAttempts {
-		if attempt > 0 {
-			klog.V(2).Infof("driver %s: %v, trying again in %v", name, err, driverRetryDelay)
-			select {
-			case <-ctx.Done():
-				return nil, nodeCaps{}, ctx.Err()
-			case <-time.After(driverRetryDelay):
-			}
+	conn, err := h.dialDriver(ctx, name)
+	if err == nil {
+		var caps nodeCaps
+		if caps, err = nodeCapabilities(ctx, csi.NewNodeClient(conn)); err == nil {
+			return conn, caps, nil
 		}
-		var conn *grpc.ClientConn
-		if conn, err = h.dialDriver(ctx, name); err == nil {
-			var caps nodeCaps
-			if caps, err = nodeCapabilities(ctx, csi.NewNodeClient(conn)); err == nil {
-				return conn, caps, nil
-			}
-			conn.Close()
-		}
-		if code := status.Code(err); !errors.Is(err, errNotRegistered) && code != codes.Unavailable && code != codes.DeadlineExceeded {
-			return nil, nodeCaps{}, err
-		}
+		conn.Close()
+	}
+	if code := status.Code(err); !errors.Is(err, errNotRegistered) && code != codes.Unavailable && code != codes.DeadlineExceeded {
+		return nil, nodeCaps{}, err
 	}
 	err = fmt.Errorf("%w: %w", errDriverDown, err)
 	if h.down != nil {

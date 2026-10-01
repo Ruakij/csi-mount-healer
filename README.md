@@ -117,9 +117,9 @@ tier right away, and so does one whose processes still hold the dead mount
 their swap. With `-live-timeout=0` a swapped container is never escalated.
 
 Every tier but `delete` needs the remount through the driver. A driver that is
-not registered, refuses the connection or does not answer within 10 seconds is
-tried 3 times, 10 seconds apart, so a driver restart in progress is waited out.
-A failed remount is healed again at the next check, until the pod fails
+not registered, refuses the connection or does not answer within 10 seconds
+counts as down. A failed remount is healed again at the next check, one
+`-interval` later, until the pod fails
 `-driver-down-attempts` heals in a row on an unreachable driver, or
 `-remount-attempts` on a reachable one that cannot remount; then it is
 escalated, which ends at the delete tier. Both count the same heals in a row,
@@ -127,9 +127,10 @@ each against its own limit, and `0` never escalates.
 
 - An unreachable driver is waited for by default: the pod keeps running, and
   once the driver is back the live tier keeps its processes. With
-  `-driver-down-attempts=1` the pod is deleted at once instead, and the new pod
-  waits in `ContainerCreating` until the driver is back, so the app is stopped
-  rather than running on a dead mount.
+  `-driver-down-attempts` the pod is deleted instead, and the new pod waits in
+  `ContainerCreating` until the driver is back, so the app is stopped rather
+  than running on a dead mount. `1` deletes it at the first heal, even when the
+  driver is only in the middle of a restart; `2` waits out a restart.
 - A reachable driver that cannot remount gets 2 more checks by default. This
   covers drivers whose own mount on the node is dead too and recovers by itself,
   for example when a liveness probe restarts it.
@@ -154,7 +155,7 @@ driver that takes longer, raise `-strikes` or `-interval`.
 | Processes still hold the dead mount after `-live-timeout` | the container is restarted with `restartPolicy: Always`, else the pod is deleted if a controller recreates it | as above, then `Escalating`, and `DeletingPod` or `NotHealed` |
 | The same, with `-live-timeout=0` | the container keeps running; what it holds on the dead mount stays broken | as above, without the escalation |
 | A container cannot be swapped | restarted, or the pod deleted, as above | `DeadMount`, `Remounted` (driver), `Escalating`, then as above |
-| The driver cannot be reached after 3 tries | healed again at every following check | `DeadMount`, `DriverDown` |
+| The driver cannot be reached | healed again at every following check | `DeadMount`, `DriverDown` |
 | The same, with `-driver-down-attempts` | the pod is deleted if a controller recreates it, at that heal in a row | `DeadMount`, `DriverDown`, then `DeletingPod` or `NotHealed` |
 | The driver is reached but the remount fails | healed again at the next check; the pod is deleted if a controller recreates it at the `-remount-attempts` heal in a row | `DeadMount`, `RemountFailed`, then `DeletingPod` or `NotHealed` |
 | The same, with `-remount-attempts=0` | healed again at every following check | `DeadMount`, `RemountFailed` |
