@@ -133,8 +133,8 @@ missing fails every write with `EPERM`.
 
 Some drivers repair their own mounts: they keep the FUSE daemon alive outside
 the driver pod (a systemd scope on the node, a separate mount pod), or remount
-on startup or from a health check, like SeaweedFS CSI every 30 seconds. A mount
-they repair in time passes the next check and is left alone, so the healer only
+on startup or from a health check, like SeaweedFS CSI every 30 seconds, though
+only for volumes staged since its own last restart. A mount they repair in time passes the next check and is left alone, so the healer only
 steps in when they do not. The default leaves them at least 2 minutes; for a
 driver that takes longer, raise `-strikes` or `-interval`.
 
