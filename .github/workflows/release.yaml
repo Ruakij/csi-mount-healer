@@ -21,7 +21,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # major.minor and major are skipped for prereleases by the action itself.
+      # {{version}} is the v-less tag the chart stamps as appVersion; a mismatch there
+      # is an ImagePullBackOff. major.minor and major are skipped for prereleases by
+      # the action itself.
       - id: meta
         uses: docker/metadata-action@v6
         with:
@@ -41,14 +43,69 @@ jobs:
           sbom: true
           provenance: mode=max
 
+  # One GitHub release per tag with the chart attached, the OCI chart, and for
+  # stable versions the index on gh-pages, all off the same tag so they cannot
+  # drift apart.
   release:
     runs-on: ubuntu-latest
     needs: image
+    # Serialised because stable releases push to gh-pages.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     steps:
+      # Full history also fetches gh-pages for the index update.
       - uses: actions/checkout@v7
-      - env:
+        with:
+          fetch-depth: 0
+      - uses: azure/setup-helm@v5
+      # The tag is the single source of truth. Without this the chart would ship
+      # an appVersion, and therefore a default image tag, that was never pushed.
+      - name: Stamp the chart with the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version: .*/version: ${version}/" charts/csi-mount-healer/Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: \"${version}\"/" charts/csi-mount-healer/Chart.yaml
+          prerelease=false
+          case "${version}" in *-*) prerelease=true ;; esac
+          sed -i "s|^\(  artifacthub.io/prerelease:\).*|\1 \"${prerelease}\"|" charts/csi-mount-healer/Chart.yaml
+          helm lint charts/csi-mount-healer
+          helm package charts/csi-mount-healer -d dist
+      - name: Push chart to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # OCI references must be lowercase, and the owner login is not.
+          owner=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin <<<"${GITHUB_TOKEN}"
+          helm push dist/csi-mount-healer-*.tgz "oci://ghcr.io/${owner}/charts"
+      - name: Create the GitHub release
+        env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          prerelease=
-          case "${GITHUB_REF_NAME}" in *-*) prerelease=--prerelease ;; esac
-          gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes ${prerelease}
+          flags=()
+          case "${GITHUB_REF_NAME}" in
+            *-*) flags+=(--prerelease) ;;
+            # Notes for a stable release span back to the previous stable one, not
+            # to the last RC.
+            *)
+              prev=$(git tag -l 'v*' --sort=-v:refname | grep -v -- - | grep -vxF "${GITHUB_REF_NAME}" | head -1)
+              [ -n "${prev}" ] && flags+=(--notes-start-tag "${prev}")
+              ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" dist/csi-mount-healer-*.tgz --verify-tag --generate-notes "${flags[@]}"
+      # Prereleases stay out of the index: it is what `helm repo add` resolves, and
+      # it should list stable versions.
+      - name: Add the chart to the Helm repository index
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git worktree add pages origin/gh-pages
+          helm repo index dist --merge pages/index.yaml \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          cp dist/index.yaml pages/index.yaml
+          cd pages
+          git add index.yaml
+          git commit -m "Add csi-mount-healer ${GITHUB_REF_NAME#v}"
+          git push origin HEAD:gh-pages

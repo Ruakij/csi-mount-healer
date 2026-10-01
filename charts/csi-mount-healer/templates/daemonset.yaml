@@ -1,0 +1,86 @@
+{{- $kubeletRoot := trimSuffix "/" .Values.kubeletRootDir -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "csi-mount-healer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "csi-mount-healer.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "csi-mount-healer.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "csi-mount-healer.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "csi-mount-healer.serviceAccountName" . }}
+      # The live tier finds container processes by the pids the CRI reports, and
+      # enters their mount namespaces through /proc.
+      hostPID: true
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: healer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - {{ printf "-kubelet-root=%s" $kubeletRoot | quote }}
+            - {{ printf "-cri-endpoint=unix://%s" .Values.criSocket | quote }}
+            {{- range $name, $value := .Values.config }}
+            - {{ printf "-%s=%v" $name $value | quote }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            # Bidirectional propagation requires privileged, which grants every
+            # capability and ignores capabilities.drop; the binary drops all but
+            # CAP_SYS_ADMIN, CAP_LINUX_IMMUTABLE, CAP_DAC_READ_SEARCH,
+            # CAP_SYS_PTRACE and CAP_SYS_CHROOT itself at startup.
+            privileged: true
+            readOnlyRootFilesystem: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: kubelet
+              mountPath: {{ $kubeletRoot }}
+              mountPropagation: Bidirectional
+            - name: cri
+              mountPath: {{ .Values.criSocket }}
+      volumes:
+        - name: kubelet
+          hostPath:
+            path: {{ $kubeletRoot }}
+            type: Directory
+        - name: cri
+          hostPath:
+            path: {{ .Values.criSocket }}
+            type: Socket

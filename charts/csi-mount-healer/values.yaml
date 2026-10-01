@@ -1,0 +1,51 @@
+image:
+  repository: ghcr.io/ruakij/csi-mount-healer
+  tag: "" # defaults to the chart appVersion
+  pullPolicy: IfNotPresent
+
+# Flags of the healer by name, without the leading dash; anything not set keeps
+# the default of the binary. See the configuration table in the README, e.g.:
+#   interval: 1m
+#   strikes: 3
+#   tiers: live,restart,delete
+#   live-timeout: 1m
+#   remount-attempts: 3
+#   driver-down-attempts: 0
+#   force-delete: true
+#   guard: always
+#   guard-stage: false
+#   selector: "driver in (csi.moosefs.com),!csi-mount-healer/skip"
+#   v: 2
+config: {}
+
+# The kubelet directory on the node, mounted at the same path in the container:
+# kubelet and the drivers speak in host paths. k3s and RKE2 use the default.
+kubeletRootDir: /var/lib/kubelet
+
+# Container runtime socket on the node, for the restart and live tiers.
+# k3s: /run/k3s/containerd/containerd.sock
+# RKE2: /run/k3s/containerd/containerd.sock
+criSocket: /run/containerd/containerd.sock
+
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# Mounts die on every node a CSI driver runs on, so the healer runs on all of
+# them, tainted ones included.
+tolerations:
+  - operator: Exists
+nodeSelector: {}
+affinity: {}
+priorityClassName: system-node-critical
+updateStrategy:
+  type: RollingUpdate
+podLabels: {}
+podAnnotations: {}

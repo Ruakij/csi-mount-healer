@@ -1,0 +1,9 @@
+{{ include "csi-mount-healer.fullname" . }} checks every CSI mount on each node every
+{{ .Values.config.interval | default "1m" }}. Its steps show as events on the affected pods:
+
+  kubectl get events -A --field-selector source=csi-mount-healer
+{{- if eq .Values.criSocket "/run/containerd/containerd.sock" }}
+
+criSocket is the default /run/containerd/containerd.sock. On k3s or RKE2 it is
+/run/k3s/containerd/containerd.sock; with the wrong one the pods do not start.
+{{- end }}

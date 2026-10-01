@@ -65,12 +65,24 @@ heals them.
 
 ## Install
 
+From the Helm repository:
+
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/Ruakij/csi-mount-healer/main/deploy/csi-mount-healer.yaml
+helm repo add csi-mount-healer https://ruakij.github.io/csi-mount-healer
+helm repo update
+helm install csi-mount-healer csi-mount-healer/csi-mount-healer -n kube-system
 ```
 
-On k3s, point `CRI_ENDPOINT` and the `cri` hostPath at
-`/run/k3s/containerd/containerd.sock`.
+Or straight from the OCI registry, which is also where prereleases go:
+
+```sh
+helm install csi-mount-healer oci://ghcr.io/ruakij/charts/csi-mount-healer -n kube-system
+```
+
+On k3s and RKE2, add `--set criSocket=/run/k3s/containerd/containerd.sock`.
+Flags go under `config` by name, e.g. `--set config.interval=2m`; see
+[values.yaml](charts/csi-mount-healer/values.yaml). Without Helm,
+`helm template` renders plain manifests to apply.
 
 The container is privileged, as Bidirectional mount propagation requires, but
 the binary drops every capability except `CAP_SYS_ADMIN`,
