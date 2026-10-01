@@ -14,6 +14,8 @@ func stat(string) (bool, error) { return false, errUnsupported }
 
 func detach(string) error { return errUnsupported }
 
+func stagingBinds() (map[string]bool, error) { return nil, errUnsupported }
+
 func setImmutable(string, bool) error { return errUnsupported }
 
 func DropPrivileges() error { return errUnsupported }

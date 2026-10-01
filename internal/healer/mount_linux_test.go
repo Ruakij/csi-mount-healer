@@ -246,3 +246,35 @@ func TestRemount(t *testing.T) {
 		t.Errorf("write underneath the remounted volume: got %v, want EPERM", err)
 	}
 }
+
+func TestStagingBinds(t *testing.T) {
+	root := t.TempDir()
+	staging := stagingPath(root, "d", "h")
+	bare, live := filepath.Join(root, "bare"), filepath.Join(root, "live")
+	for _, d := range []string{staging, bare, live} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// What a driver publishes while the staging mount is gone.
+	if err := unix.Mount(staging, bare, "", unix.MS_BIND, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = detach(bare) })
+	mountTmpfs(t, staging)
+	if err := unix.Mount(staging, live, "", unix.MS_BIND, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = detach(live) })
+
+	binds, err := stagingBinds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !binds[bare] {
+		t.Error("bind of the bare staging directory not found")
+	}
+	if binds[live] || binds[staging] {
+		t.Error("bind of the live staging mount reported as bare")
+	}
+}

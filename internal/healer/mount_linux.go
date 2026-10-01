@@ -4,7 +4,9 @@ package healer
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -72,4 +74,20 @@ func setImmutable(path string, on bool) error {
 		return nil
 	}
 	return unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(want))
+}
+
+// stagingBinds lists the mount points whose top mount is a bind of a bare
+// staging directory: published while the staging mount was gone, so what is
+// written there lands on the node disk. A bind of a live staging mount shows
+// the root of the staged filesystem instead.
+func stagingBinds() (map[string]bool, error) {
+	infos, err := readMountinfo(os.Getpid())
+	if err != nil {
+		return nil, err
+	}
+	binds := map[string]bool{}
+	for _, m := range infos {
+		binds[m.point] = strings.Contains(m.root, "/plugins/kubernetes.io/csi/") && strings.HasSuffix(m.root, "/globalmount")
+	}
+	return binds, nil
 }

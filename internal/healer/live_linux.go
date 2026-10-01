@@ -142,7 +142,10 @@ func cloneMount(m liveMount) (int, error) {
 }
 
 type mountInfo struct {
-	id    uint64
+	id uint64
+	// root is the directory of the filesystem the mount shows, so a bind mount
+	// tells where it was bound from.
+	root  string
 	point string
 }
 
@@ -163,7 +166,7 @@ func readMountinfo(pid int) ([]mountInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mountinfo line %q: %w", line, err)
 		}
-		infos = append(infos, mountInfo{id: id, point: mountinfoUnescaper.Replace(f[4])})
+		infos = append(infos, mountInfo{id: id, root: mountinfoUnescaper.Replace(f[3]), point: mountinfoUnescaper.Replace(f[4])})
 	}
 	return infos, nil
 }

@@ -263,6 +263,10 @@ func (h *Healer) scan(ctx context.Context) {
 	h.down = map[string]error{}
 	seen := map[string]bool{}
 	due := map[types.UID][]volume{}
+	binds, err := stagingBinds()
+	if err != nil {
+		klog.Warningf("reading mounts: %v", err)
+	}
 	for _, v := range h.volumes("*") {
 		pod := h.pod(v.podUID)
 		if pod == nil || !h.selected(pod, v) {
@@ -272,6 +276,9 @@ func (h *Healer) scan(ctx context.Context) {
 		seen[v.target] = true
 		mounted, err := h.prober.probe(v.target)
 		reason := deadReason(pod, mounted, err)
+		if reason == "" && mounted && binds[v.target] && active(pod) {
+			reason = "bound to its bare staging directory on the node disk, the staging mount is gone"
+		}
 		if reason == "" {
 			delete(h.strikes, v.target)
 			continue
