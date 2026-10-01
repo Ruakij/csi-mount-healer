@@ -14,9 +14,8 @@ configurable as [heal tiers](#heal-tiers).
 
 ## Why
 
-When the daemon behind a FUSE-based CSI mount (MooseFS, SeaweedFS, rclone, ...)
-dies, for example in a driver restart or upgrade, the pods on that node can keep
-a dead mount: `transport endpoint is not connected`. kubelet never mounts a
+When the daemon behind a FUSE-based CSI mount dies, for example in a driver
+restart or upgrade, the pods on that node can keep a dead mount: `transport endpoint is not connected`. kubelet never mounts a
 volume again for a running pod, so unless the driver repairs its mounts itself,
 the pod stays broken until someone deletes it, losing what it held in memory.
 
@@ -133,7 +132,7 @@ each against its own limit, and `0` never escalates.
   rather than running on a dead mount.
 - A reachable driver that cannot remount gets 2 more checks by default. This
   covers drivers whose own mount on the node is dead too and recovers by itself,
-  like MooseFS CSI, whose liveness probe restarts its `mfsmount`.
+  for example when a liveness probe restarts it.
 
 ### Outcomes
 
@@ -143,9 +142,8 @@ missing fails every write with `EPERM`.
 
 Some drivers repair their own mounts: they keep the FUSE daemon alive outside
 the driver pod (a systemd scope on the node, a separate mount pod), or remount
-on startup or from a health check, like SeaweedFS CSI every 30 seconds, though
-only for volumes staged since its own last restart. A mount they repair in time passes the next check and is left alone, so the healer only
-steps in when they do not. The default leaves them at least 2 minutes; for a
+on startup or from a periodic health check. A mount they repair in time passes
+the next check and is left alone, so the healer only steps in when they do not. The default leaves them at least 2 minutes; for a
 driver that takes longer, raise `-strikes` or `-interval`.
 
 | When | What happens | Events |
@@ -170,7 +168,7 @@ driver that takes longer, raise `-strikes` or `-interval`.
 |---|---|---|---|
 | `-guard=always` (default) | underneath the publish target of every started pod | a container started on a missing mount fails on its first write | none known; released as soon as the pod stops, so kubelet can remove the directory |
 | `-guard=remount` | underneath the publish target, while it is remounted | nothing is left immutable between heals | a mount that dies between checks exposes a writable directory |
-| `-guard-stage` (off by default) | underneath the staging mount of every volume a started pod uses | a pod published while the staging mount is gone cannot write to the node disk | breaks drivers that remove the staging directory while pods use the volume, e.g. the recovery of SeaweedFS CSI |
+| `-guard-stage` (off by default) | underneath the staging mount of every volume a started pod uses | a pod published while the staging mount is gone cannot write to the node disk | breaks drivers that remove the staging directory while pods use the volume, e.g. to recover it |
 
 Every guard is released when the healer shuts down.
 
@@ -198,7 +196,7 @@ The selector has the syntax of `kubectl -l` and sees the labels of the pod plus
 same name, e.g.:
 
 ```sh
--selector='driver in (csi.moosefs.com,seaweedfs-csi-driver),namespace notin (kube-system),!csi-mount-healer/skip'
+-selector='driver in (fuse.csi.example.com),namespace notin (kube-system),!csi-mount-healer/skip'
 ```
 
 A flag wins over its environment variable. Plus the `klog` flags, e.g. `-v=2`,
