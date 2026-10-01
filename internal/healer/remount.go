@@ -117,6 +117,10 @@ func (h *Healer) restage(ctx context.Context, node csi.NodeClient, req *csi.Node
 		return nil
 	}
 	klog.Infof("restaging %s", path)
+	// The driver may remove and recreate the directory.
+	if err := setImmutable(path, false); err != nil {
+		return err
+	}
 	cctx, cancel := context.WithTimeout(ctx, csiTimeout)
 	defer cancel()
 	if _, err := node.NodeUnstageVolume(cctx, &csi.NodeUnstageVolumeRequest{
@@ -133,7 +137,13 @@ func (h *Healer) restage(ctx context.Context, node csi.NodeClient, req *csi.Node
 	if _, err := node.NodeStageVolume(cctx, req); err != nil {
 		return fmt.Errorf("NodeStageVolume: %w", err)
 	}
-	return h.verify(path)
+	if err := h.verify(path); err != nil {
+		return err
+	}
+	if h.cfg.GuardStage {
+		return setImmutable(path, true)
+	}
+	return nil
 }
 
 // verify checks that path is a live mount. A stat still hung on the old mount

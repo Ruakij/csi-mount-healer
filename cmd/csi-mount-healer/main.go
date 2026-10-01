@@ -42,6 +42,7 @@ func main() {
 	flag.BoolVar(&cfg.DeleteOnDriverDown, "delete-on-driver-down", false, "escalate a dead volume whose CSI driver cannot be reached, which ends at the delete tier, instead of healing it again at the next check")
 	flag.BoolVar(&cfg.ForceDelete, "force-delete", true, "force delete a pod stuck terminating on a dead mount")
 	flag.StringVar(&guard, "guard", string(healer.GuardAlways), "make the directory underneath a mount immutable: always | remount | off")
+	flag.BoolVar(&cfg.GuardStage, "guard-stage", false, "also make the staging directory of a volume in use immutable; breaks drivers that remove it while pods use the volume")
 	flag.StringVar(&selector, "selector", "", "label selector over the pod labels plus namespace and driver, picking the volumes to check, heal and guard; empty picks all")
 	flag.StringVar(&cfg.CRIEndpoint, "cri-endpoint", "unix:///run/containerd/containerd.sock", "container runtime socket, used to restart containers after a remount")
 

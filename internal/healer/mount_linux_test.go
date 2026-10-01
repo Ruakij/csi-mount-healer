@@ -19,6 +19,7 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
 )
 
@@ -206,7 +207,12 @@ func TestRemount(t *testing.T) {
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = setImmutable(v.target, false); _ = detach(v.target); _ = detach(staging) })
+	t.Cleanup(func() {
+		_ = setImmutable(v.target, false)
+		_ = setImmutable(staging, false)
+		_ = detach(v.target)
+		_ = detach(staging)
+	})
 
 	d := &fakeDriver{name: "d", endpoint: filepath.Join(root, "plugins", "d", "csi.sock")}
 	serve(t, d.endpoint, func(s *grpc.Server) { csi.RegisterNodeServer(s, d) })
@@ -216,7 +222,7 @@ func TestRemount(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "d"},
 		Spec:       storagev1.CSIDriverSpec{AttachRequired: ptr(false)},
 	})
-	h, err := New(Config{NodeName: "n", KubeletRoot: root, Strikes: 1, StatTimeout: 5 * time.Second, Guard: GuardAlways, KubeClient: client})
+	h, err := New(Config{NodeName: "n", KubeletRoot: root, Strikes: 1, StatTimeout: 5 * time.Second, Guard: GuardAlways, GuardStage: true, KubeClient: client})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +250,25 @@ func TestRemount(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(v.target, "x"), nil, 0o644); !errors.Is(err, unix.EPERM) {
 		t.Errorf("write underneath the remounted volume: got %v, want EPERM", err)
+	}
+	if err := detach(staging); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "x"), nil, 0o644); !errors.Is(err, unix.EPERM) {
+		t.Errorf("write underneath the restaged volume: got %v, want EPERM", err)
+	}
+
+	// Both guards go once the pod stops.
+	pod.DeletionTimestamp = &metav1.Time{}
+	h.pods = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{uidIndex: indexByUID})
+	if err := h.pods.Add(pod); err != nil {
+		t.Fatal(err)
+	}
+	h.sweep(string(pod.UID))
+	for _, p := range []string{v.target, staging} {
+		if err := os.WriteFile(filepath.Join(p, "x"), nil, 0o644); err != nil {
+			t.Errorf("write underneath %s after the pod stopped: %v", p, err)
+		}
 	}
 }
 

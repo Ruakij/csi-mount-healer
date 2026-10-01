@@ -61,6 +61,10 @@ type Config struct {
 	// dead mount, whose processes may then outlive their replacement.
 	ForceDelete bool
 	Guard       GuardMode
+	// GuardStage guards the staging directory of every volume a running pod
+	// uses, so a pod published while the staging mount is gone cannot write
+	// to the node disk.
+	GuardStage  bool
 	CRIEndpoint string
 	// Selector picks the volumes to check, heal and guard. It matches the labels
 	// of the pod plus namespace and driver, which override pod labels of the same
@@ -151,15 +155,15 @@ func (h *Healer) Run(ctx context.Context) error {
 	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 		return ctx.Err()
 	}
-	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, tiers %q, live timeout %v, guard %s, selector %q",
-		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.LiveTimeout, h.cfg.Guard, h.cfg.Selector)
+	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, tiers %q, live timeout %v, guard %s, guard stage %v, selector %q",
+		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.LiveTimeout, h.cfg.Guard, h.cfg.GuardStage, h.cfg.Selector)
 
 	// Also clears what a previous run in another mode left behind.
 	h.sweep("*")
 
 	every(ctx, h.cfg.Interval, func() {
 		// Retries guards that failed to set on a pod update.
-		if h.cfg.Guard == GuardAlways {
+		if h.cfg.Guard == GuardAlways || h.cfg.GuardStage {
 			h.sweep("*")
 		}
 		h.scan(ctx)
@@ -172,6 +176,7 @@ func (h *Healer) Run(ctx context.Context) error {
 			klog.Warningf("releasing guard on %s: %v", v.target, err)
 		}
 	}
+	h.guardStages(false)
 	return nil
 }
 
@@ -255,6 +260,34 @@ func (h *Healer) sweep(podUID string) {
 		guard := h.cfg.Guard == GuardAlways && pod != nil && h.selected(pod, v) && active(pod) && started(pod)
 		if err := setImmutable(v.target, guard); err != nil {
 			klog.Warningf("setting guard on %s to %v: %v", v.target, guard, err)
+		}
+	}
+	if h.cfg.GuardStage || podUID == "*" {
+		h.guardStages(h.cfg.GuardStage)
+	}
+}
+
+// guardStages guards the staging directories of the volumes running pods use
+// and releases every other one. Pods share the staging of a volume, so it is
+// always worked out over every pod. Inline ephemeral volumes are not staged.
+func (h *Healer) guardStages(enabled bool) {
+	want := map[string]bool{}
+	for _, v := range h.volumes("*") {
+		if !enabled {
+			break
+		}
+		pod := h.pod(v.podUID)
+		if pod == nil || !active(pod) || !started(pod) || !h.selected(pod, v) {
+			continue
+		}
+		if d, err := v.data(); err == nil && !d.ephemeral() {
+			want[stagingPath(h.cfg.KubeletRoot, d.DriverName, d.VolumeHandle)] = true
+		}
+	}
+	stages, _ := filepath.Glob(filepath.Join(h.cfg.KubeletRoot, "plugins/kubernetes.io/csi/*/*/globalmount"))
+	for _, s := range stages {
+		if err := setImmutable(s, want[s]); err != nil {
+			klog.Warningf("setting guard on %s to %v: %v", s, want[s], err)
 		}
 	}
 }
