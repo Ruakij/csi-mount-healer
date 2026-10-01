@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 )
@@ -111,15 +111,29 @@ func TestSelected(t *testing.T) {
 	}
 }
 
-// A driver that is not registered counts as down after every attempt, and heals
-// again at the next check unless DeleteOnDriverDown escalates it.
-func TestHealDriverDown(t *testing.T) {
+// A failed remount heals again at the next check until its attempts are used
+// up, counted per class: a driver that is not registered, and one reached that
+// cannot remount, here for want of vol_data.json.
+func TestHealAttempts(t *testing.T) {
 	attempts, delay := driverAttempts, driverRetryDelay
 	driverAttempts, driverRetryDelay = 2, time.Millisecond
 	t.Cleanup(func() { driverAttempts, driverRetryDelay = attempts, delay })
 
-	for _, deleteOnDown := range []bool{false, true} {
-		t.Run(fmt.Sprintf("delete on driver down %v", deleteOnDown), func(t *testing.T) {
+	tests := []struct {
+		name     string
+		down     bool
+		attempts int
+		// heals is how many heals fail before the pod is deleted, 0 for never.
+		heals int
+	}{
+		{name: "driver down, never escalated", down: true, attempts: 0},
+		{name: "driver down, escalated at once", down: true, attempts: 1, heals: 1},
+		{name: "driver down, escalated at the second heal", down: true, attempts: 2, heals: 2},
+		{name: "remount failed, never escalated", attempts: 0},
+		{name: "remount failed, escalated at the third heal", attempts: 3, heals: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
 			pod := testPod()
 			pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
@@ -128,40 +142,47 @@ func TestHealDriverDown(t *testing.T) {
 			if err := os.MkdirAll(dir, 0o750); err != nil {
 				t.Fatal(err)
 			}
-			data, _ := json.Marshal(volData{SpecVolID: "pv-1", VolumeHandle: "h", DriverName: "d"})
-			if err := os.WriteFile(filepath.Join(dir, "vol_data.json"), data, 0o644); err != nil {
-				t.Fatal(err)
+			if tt.down {
+				data, _ := json.Marshal(volData{SpecVolID: "pv-1", VolumeHandle: "h", DriverName: "d"})
+				if err := os.WriteFile(filepath.Join(dir, "vol_data.json"), data, 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
 			client := fake.NewClientset(pod)
-			events := record.NewFakeRecorder(10)
-			h := &Healer{cfg: Config{KubeletRoot: root, KubeClient: client, DeleteOnDriverDown: deleteOnDown}, events: events, down: map[string]error{}}
+			events := record.NewFakeRecorder(20)
+			cfg := Config{KubeletRoot: root, KubeClient: client, RemountAttempts: tt.attempts, DriverDownAttempts: tt.attempts}
+			h := &Healer{cfg: cfg, events: events, failed: map[types.UID]int{}}
 			if err := h.cfg.Tiers.Set("live,restart,delete"); err != nil {
 				t.Fatal(err)
 			}
 
-			healed := h.heal(context.Background(), pod, []volume{{podUID: pod.UID, dir: dir, target: filepath.Join(dir, "mount")}})
-
-			if healed != deleteOnDown {
-				t.Errorf("healed = %v, want %v", healed, deleteOnDown)
+			retry, want := "RemountFailed", []string{}
+			if tt.down {
+				retry = "DriverDown"
 			}
-			if !errors.Is(h.down["d"], errDriverDown) {
-				t.Errorf("driver d not recorded as down: %v", h.down["d"])
+			for i := 1; i <= 4; i++ {
+				h.down = map[string]error{}
+				healed := h.heal(context.Background(), pod, []volume{{podUID: pod.UID, dir: dir, target: filepath.Join(dir, "mount")}})
+				if escalated := i == tt.heals; healed != escalated {
+					t.Fatalf("heal %d: healed = %v, want %v", i, healed, escalated)
+				}
+				if i == tt.heals {
+					want = append(want, "DeletingPod")
+					break
+				}
+				want = append(want, retry)
 			}
 			close(events.Events)
 			var got []string
 			for e := range events.Events {
 				got = append(got, strings.Fields(e)[1])
 			}
-			want := "DriverDown"
-			if deleteOnDown {
-				want = "DeletingPod"
-			}
-			if strings.Join(got, ",") != want {
-				t.Errorf("events %v, want %s", got, want)
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("events %v, want %v", got, want)
 			}
 			_, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-			if deleted := err != nil; deleted != deleteOnDown {
-				t.Errorf("pod deleted = %v, want %v", deleted, deleteOnDown)
+			if deleted := err != nil; deleted != (tt.heals > 0) {
+				t.Errorf("pod deleted = %v, want %v", deleted, tt.heals > 0)
 			}
 		})
 	}

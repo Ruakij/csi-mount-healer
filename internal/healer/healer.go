@@ -54,9 +54,12 @@ type Config struct {
 	// LiveTimeout is how long a container swapped by the live tier may hold on to
 	// the dead mount before it is escalated to the next tier; 0 disables that.
 	LiveTimeout time.Duration
-	// DeleteOnDriverDown escalates a volume whose driver cannot be reached, which
-	// ends at the delete tier, instead of healing it again at the next check.
-	DeleteOnDriverDown bool
+	// RemountAttempts is how many heals in a row may fail to remount a volume
+	// through its reachable driver before it is escalated, the attempts before
+	// waiting for the next check; 0 never escalates.
+	RemountAttempts int
+	// DriverDownAttempts is the same for a driver that cannot be reached.
+	DriverDownAttempts int
 	// ForceDelete lets the delete tier force delete a pod stuck terminating on a
 	// dead mount, whose processes may then outlive their replacement.
 	ForceDelete bool
@@ -81,6 +84,8 @@ type Healer struct {
 	pods    cache.Indexer
 	events  record.EventRecorder
 	strikes map[string]int
+	// failed counts the heals in a row of a pod that failed to remount.
+	failed map[types.UID]int
 	// down are the drivers found down during the current scan, by name.
 	down  map[string]error
 	stale func(*swap) (int, []string, error)
@@ -104,10 +109,13 @@ func New(cfg Config) (*Healer, error) {
 	if cfg.LiveTimeout < 0 {
 		return nil, errors.New("live timeout must not be negative")
 	}
+	if cfg.RemountAttempts < 0 || cfg.DriverDownAttempts < 0 {
+		return nil, errors.New("attempts must not be negative")
+	}
 	if cfg.Selector == nil {
 		cfg.Selector = labels.Everything()
 	}
-	h := &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]int{}}
+	h := &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]int{}, failed: map[types.UID]int{}}
 	h.stale = func(s *swap) (int, []string, error) { return staleHandles(s.pid, s.ns, s.dead, cfg.StatTimeout) }
 	return h, nil
 }
@@ -155,8 +163,8 @@ func (h *Healer) Run(ctx context.Context) error {
 	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 		return ctx.Err()
 	}
-	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, tiers %q, live timeout %v, guard %s, guard stage %v, selector %q",
-		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.LiveTimeout, h.cfg.Guard, h.cfg.GuardStage, h.cfg.Selector)
+	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, tiers %q, live timeout %v, remount attempts %d, driver down attempts %d, guard %s, guard stage %v, selector %q",
+		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.LiveTimeout, h.cfg.RemountAttempts, h.cfg.DriverDownAttempts, h.cfg.Guard, h.cfg.GuardStage, h.cfg.Selector)
 
 	// Also clears what a previous run in another mode left behind.
 	h.sweep("*")
@@ -332,11 +340,17 @@ func (h *Healer) scan(ctx context.Context) {
 			delete(h.strikes, target)
 		}
 	}
+	for uid := range h.failed {
+		if due[uid] == nil {
+			delete(h.failed, uid)
+		}
+	}
 	for uid, vols := range due {
 		if pod := h.pod(uid); pod != nil && !h.heal(ctx, pod, vols) {
 			// The strikes stay, so the next check heals again.
 			continue
 		}
+		delete(h.failed, uid)
 		for _, v := range vols {
 			delete(h.strikes, v.target)
 		}
@@ -357,10 +371,10 @@ func deadReason(pod *corev1.Pod, mounted bool, err error) string {
 	return ""
 }
 
-// heal reports false when the driver cannot be reached and DeleteOnDriverDown
-// is off, for the next check to heal again.
+// heal reports false when the remount failed with attempts left, for the next
+// check to heal again.
 func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) bool {
-	healed := true
+	healed, retry := true, false
 	from, why := Tier(0), ""
 	if pod.DeletionTimestamp != nil {
 		from, why = TierDelete, "it is stuck terminating on a dead mount"
@@ -374,15 +388,15 @@ func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) bool 
 		}
 		if podVolumes == nil && remountErr == nil {
 			podVolumes, remountErr = h.remountAll(ctx, pod, vols)
+			if remountErr != nil {
+				retry, remountErr = h.remountFailed(pod, remountErr)
+			}
 		}
-		switch {
-		case errors.Is(remountErr, errDriverDown) && !h.cfg.DeleteOnDriverDown:
-			klog.Warningf("pod %s/%s: %v, healing again at the next check", pod.Namespace, pod.Name, remountErr)
-			// A fixed message, so repeats are counted on one event.
-			h.events.Eventf(pod, corev1.EventTypeWarning, "DriverDown", "The CSI driver cannot be reached, healing again at the next check")
+		if retry {
 			healed = false
 			return nil
-		case remountErr != nil:
+		}
+		if remountErr != nil {
 			// Every tier before delete needs the remount; it is not tried twice.
 			return remountErr
 		}
@@ -399,6 +413,35 @@ func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) bool 
 		return nil
 	})
 	return healed
+}
+
+// remountFailed counts a failed remount of pod and reports whether attempts
+// are left, in which case the next check heals again.
+func (h *Healer) remountFailed(pod *corev1.Pod, err error) (bool, error) {
+	down := errors.Is(err, errDriverDown)
+	limit := h.cfg.RemountAttempts
+	if down {
+		limit = h.cfg.DriverDownAttempts
+	}
+	h.failed[pod.UID]++
+	n := h.failed[pod.UID]
+	if limit != 0 && n >= limit {
+		if n > 1 {
+			err = fmt.Errorf("%w, %d heals in a row", err, n)
+		}
+		return false, err
+	}
+	attempt := ""
+	if limit != 0 {
+		attempt = fmt.Sprintf(" (attempt %d of %d)", n, limit)
+	}
+	klog.Warningf("pod %s/%s: %v, healing again at the next check%s", pod.Namespace, pod.Name, err, attempt)
+	if down {
+		h.events.Eventf(pod, corev1.EventTypeWarning, "DriverDown", "The CSI driver cannot be reached, healing again at the next check%s", attempt)
+	} else {
+		h.events.Eventf(pod, corev1.EventTypeWarning, "RemountFailed", "%v, healing again at the next check%s", err, attempt)
+	}
+	return true, nil
 }
 
 func (h *Healer) remountAll(ctx context.Context, pod *corev1.Pod, vols []volume) (map[string]string, error) {

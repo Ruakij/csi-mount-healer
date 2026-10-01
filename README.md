@@ -95,7 +95,8 @@ on its node:
 | `Remounted` | Warning | a volume was swapped into a running container that still holds handles on the dead mount, with their count, the processes and the time of its escalation |
 | `Escalating` | Warning | a container is escalated from the live tier to the next, with the reason |
 | `DeletingPod` | Warning | the delete tier, with the reason the tiers before it did not heal it |
-| `DriverDown` | Warning | the driver of a dead volume cannot be reached, healing again at the next check; counted on one event while it stays down |
+| `DriverDown` | Warning | the driver of a dead volume cannot be reached, healing again at the next check, with the attempt when `-driver-down-attempts` limits them; counted on one event otherwise |
+| `RemountFailed` | Warning | the driver was reached but the remount failed, with the error and the attempt, healing again at the next check |
 | `NotHealed` | Warning | no enabled tier was left, with the reasons |
 
 ## Heal tiers
@@ -116,14 +117,23 @@ tier right away, and so does one whose processes still hold the dead mount
 `-live-timeout` after the swap, with an `Escalating` event. Other containers keep
 their swap. With `-live-timeout=0` a swapped container is never escalated.
 
-Every tier but `delete` needs the driver. One that is not registered, refuses
-the connection or does not answer within 10 seconds is tried 3 times, 10 seconds
-apart, so a driver restart in progress is waited out. Still unreachable, the
-volume gets a `DriverDown` event and is healed again at the next check: the pod
-keeps running, and once the driver is back the live tier keeps its processes.
-With `-delete-on-driver-down` the volume is escalated instead, which ends at the
-delete tier; the new pod waits in `ContainerCreating` until the driver is back,
-so the app is stopped rather than running on a dead mount.
+Every tier but `delete` needs the remount through the driver. A driver that is
+not registered, refuses the connection or does not answer within 10 seconds is
+tried 3 times, 10 seconds apart, so a driver restart in progress is waited out.
+A failed remount is healed again at the next check, until the pod fails
+`-driver-down-attempts` heals in a row on an unreachable driver, or
+`-remount-attempts` on a reachable one that cannot remount; then it is
+escalated, which ends at the delete tier. Both count the same heals in a row,
+each against its own limit, and `0` never escalates.
+
+- An unreachable driver is waited for by default: the pod keeps running, and
+  once the driver is back the live tier keeps its processes. With
+  `-driver-down-attempts=1` the pod is deleted at once instead, and the new pod
+  waits in `ContainerCreating` until the driver is back, so the app is stopped
+  rather than running on a dead mount.
+- A reachable driver that cannot remount gets 2 more checks by default. This
+  covers drivers whose own mount on the node is dead too and recovers by itself,
+  like MooseFS CSI, whose liveness probe restarts its `mfsmount`.
 
 ### Outcomes
 
@@ -146,9 +156,10 @@ driver that takes longer, raise `-strikes` or `-interval`.
 | Processes still hold the dead mount after `-live-timeout` | the container is restarted with `restartPolicy: Always`, else the pod is deleted if a controller recreates it | as above, then `Escalating`, and `DeletingPod` or `NotHealed` |
 | The same, with `-live-timeout=0` | the container keeps running; what it holds on the dead mount stays broken | as above, without the escalation |
 | A container cannot be swapped | restarted, or the pod deleted, as above | `DeadMount`, `Remounted` (driver), `Escalating`, then as above |
-| The driver cannot be reached after 3 attempts | healed again at every following check | `DeadMount`, `DriverDown` |
-| The same, with `-delete-on-driver-down` | the pod is deleted if a controller recreates it | `DeadMount`, `DeletingPod` or `NotHealed` |
-| The driver is reached but the remount fails | the pod is deleted if a controller recreates it | `DeadMount`, `DeletingPod` or `NotHealed` |
+| The driver cannot be reached after 3 tries | healed again at every following check | `DeadMount`, `DriverDown` |
+| The same, with `-driver-down-attempts` | the pod is deleted if a controller recreates it, at that heal in a row | `DeadMount`, `DriverDown`, then `DeletingPod` or `NotHealed` |
+| The driver is reached but the remount fails | healed again at the next check; the pod is deleted if a controller recreates it at the `-remount-attempts` heal in a row | `DeadMount`, `RemountFailed`, then `DeletingPod` or `NotHealed` |
+| The same, with `-remount-attempts=0` | healed again at every following check | `DeadMount`, `RemountFailed` |
 | The pod has no controller and no other tier heals it | nothing | `DeadMount`, `NotHealed` |
 | The pod is stuck terminating on a dead mount | force deleted, unless `-force-delete=false` | `DeadMount`, `DeletingPod` or `NotHealed` |
 | `-tiers=` is empty | nothing; repeats every `-strikes` checks while the mount stays dead | `DeadMount`, `NotHealed` |
@@ -174,7 +185,8 @@ Every guard is released when the healer shuts down.
 | `-stat-timeout` | `STAT_TIMEOUT` | `30s` | how long a `stat` may take before the mount counts as hung |
 | `-tiers` | `TIERS` | `live,restart,delete` | [heal tiers](#heal-tiers) to use; empty only reports |
 | `-live-timeout` | `LIVE_TIMEOUT` | `1m` | how long a swapped container may hold the dead mount before it is escalated; `0` disables that |
-| `-delete-on-driver-down` | `DELETE_ON_DRIVER_DOWN` | `false` | escalate a dead volume whose driver cannot be reached instead of healing it again at the next check |
+| `-remount-attempts` | `REMOUNT_ATTEMPTS` | `3` | heals in a row that may fail on a reachable driver before the volume is [escalated](#heal-tiers); `0` never escalates |
+| `-driver-down-attempts` | `DRIVER_DOWN_ATTEMPTS` | `0` | heals in a row that may find the driver unreachable before the volume is [escalated](#heal-tiers); `0` never escalates |
 | `-force-delete` | `FORCE_DELETE` | `true` | force delete a pod stuck terminating on a dead mount |
 | `-guard` | `GUARD` | `always` | [guard](#guards) mode: `always`, `remount` or `off` |
 | `-guard-stage` | `GUARD_STAGE` | `false` | also [guard](#guards) staging directories |
