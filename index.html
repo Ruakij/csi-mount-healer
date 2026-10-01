@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>csi-mount-healer Helm repository</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 46rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.6; }
+  pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; border-radius: 6px; }
+  code { font-family: ui-monospace, monospace; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .35rem .75rem .35rem 0; border-bottom: 1px solid #ddd; }
+</style>
+</head>
+<body>
+<h1>csi-mount-healer</h1>
+<p>Helm chart repository for
+<a href="https://github.com/Ruakij/csi-mount-healer">csi-mount-healer</a>, a DaemonSet that
+remounts dead CSI volumes of running pods through their CSI driver, and keeps pods from
+writing to the node disk while a mount is missing.</p>
+
+<pre><code>helm repo add csi-mount-healer https://ruakij.github.io/csi-mount-healer
+helm repo update
+helm install csi-mount-healer csi-mount-healer/csi-mount-healer -n kube-system</code></pre>
+
+<p>Charts are also published as OCI artifacts at
+<code>oci://ghcr.io/ruakij/charts/csi-mount-healer</code>, which is where prereleases go.
+The index here lists stable releases only.</p>
+
+<h2>Releases</h2>
+<p id="releases">See <a href="https://github.com/Ruakij/csi-mount-healer/releases">GitHub releases</a>.</p>
+
+<p>See the <a href="https://github.com/Ruakij/csi-mount-healer#readme">README</a> for
+configuration and what happens to a pod when its mount dies.</p>
+<script>
+// Reads the chart index served next to this page, so the list follows each release.
+fetch("index.yaml").then(r => r.text()).then(text => {
+  const field = (entry, name) => (entry.match(new RegExp("\\n    " + name + ": \"?([^\"\\n]*)")) || [])[1] || "";
+  const rows = text.split(/\n  - /).slice(1).map(entry => {
+    entry = "\n    " + entry;
+    const version = field(entry, "version");
+    const tag = "v" + version;
+    return `<tr><td><a href="https://github.com/Ruakij/csi-mount-healer/releases/tag/${tag}">${version}</a></td>` +
+      `<td><code>ghcr.io/ruakij/csi-mount-healer:${field(entry, "appVersion")}</code></td>` +
+      `<td>${field(entry, "created").slice(0, 10)}</td></tr>`;
+  });
+  if (rows.length) {
+    document.getElementById("releases").outerHTML =
+      "<table><tr><th>Chart</th><th>Image</th><th>Released</th></tr>" + rows.join("") + "</table>";
+  }
+});
+</script>
+</body>
+</html>
