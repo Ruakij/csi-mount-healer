@@ -14,10 +14,11 @@ configurable as [heal tiers](#heal-tiers).
 
 ## Why
 
-When a FUSE-based CSI driver (MooseFS, SeaweedFS, rclone, ...) restarts or its
-daemon crashes, every pod on that node keeps a dead mount: `transport endpoint is
-not connected`. kubelet never mounts a volume again for a running pod, so the pod
-stays broken until someone deletes it, losing what it held in memory.
+When the daemon behind a FUSE-based CSI mount (MooseFS, SeaweedFS, rclone, ...)
+dies, for example in a driver restart or upgrade, the pods on that node can keep
+a dead mount: `transport endpoint is not connected`. kubelet never mounts a
+volume again for a running pod, so unless the driver repairs its mounts itself,
+the pod stays broken until someone deletes it, losing what it held in memory.
 
 Worse than a dead mount is a missing one. The empty directory underneath is a
 plain directory on the node disk, and a container started on it initialises
@@ -129,6 +130,13 @@ so the app is stopped rather than running on a dead mount.
 With the default settings, a mount that dies is healed at its third failed
 check in a row, 2 to 3 minutes later. Until then, a guarded mount that is
 missing fails every write with `EPERM`.
+
+Some drivers repair their own mounts: they keep the FUSE daemon alive outside
+the driver pod (a systemd scope on the node, a separate mount pod), or remount
+on startup or from a health check, like SeaweedFS CSI every 30 seconds. A mount
+they repair in time passes the next check and is left alone, so the healer only
+steps in when they do not. The default leaves them at least 2 minutes; for a
+driver that takes longer, raise `-strikes` or `-interval`.
 
 | When | What happens | Events |
 |---|---|---|
