@@ -57,8 +57,11 @@ type Config struct {
 	// DeleteOnDriverDown escalates a volume whose driver cannot be reached, which
 	// ends at the delete tier, instead of healing it again at the next check.
 	DeleteOnDriverDown bool
-	Guard              GuardMode
-	CRIEndpoint        string
+	// ForceDelete lets the delete tier force delete a pod stuck terminating on a
+	// dead mount, whose processes may then outlive their replacement.
+	ForceDelete bool
+	Guard       GuardMode
+	CRIEndpoint string
 	// Selector picks the volumes to check, heal and guard. It matches the labels
 	// of the pod plus namespace and driver, which override pod labels of the same
 	// name. Nil or empty picks every volume.

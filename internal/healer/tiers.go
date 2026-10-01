@@ -66,6 +66,8 @@ func (h *Healer) next(pod *corev1.Pod, from Tier) (Tier, []string) {
 			skipped = append(skipped, "the "+t.String()+" tier is disabled")
 		case t == TierRestart && pod.Spec.RestartPolicy != corev1.RestartPolicyAlways:
 			skipped = append(skipped, "the restart tier needs restartPolicy Always, the pod has "+string(pod.Spec.RestartPolicy))
+		case t == TierDelete && pod.DeletionTimestamp != nil && !h.cfg.ForceDelete:
+			skipped = append(skipped, "the delete tier only force deletes a pod that is already terminating, and -force-delete is off")
 		case t == TierDelete && len(pod.OwnerReferences) == 0 && pod.DeletionTimestamp == nil:
 			// A pod that is already terminating is on its way out regardless.
 			skipped = append(skipped, "the delete tier needs a controller to recreate the pod, the pod has none")

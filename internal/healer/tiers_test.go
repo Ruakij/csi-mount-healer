@@ -46,8 +46,10 @@ func TestEscalate(t *testing.T) {
 		policy corev1.RestartPolicy
 		// bare pods have no controller.
 		bare bool
-		from Tier
-		fail []Tier
+		// noForce turns ForceDelete off.
+		noForce bool
+		from    Tier
+		fail    []Tier
 		// tried lists the tiers run, and why the ones that ran were chosen, or
 		// the reason of the NotHealed event when no tier was left.
 		tried []Tier
@@ -74,12 +76,14 @@ func TestEscalate(t *testing.T) {
 			tried: []Tier{TierLive}, why: []string{"", "the live tier failed: boom; the restart tier needs restartPolicy Always, the pod has Never; the delete tier needs a controller"}},
 		{name: "bare pod terminating", tiers: "restart,delete", bare: true, from: TierDelete,
 			tried: []Tier{TierDelete}, why: []string{"stuck terminating"}},
+		{name: "terminating without force", tiers: "restart,delete", from: TierDelete, noForce: true,
+			why: []string{"stuck terminating on a dead mount; the delete tier only force deletes"}},
 		{name: "report only", tiers: "",
 			why: []string{"the restart tier is disabled; the delete tier is disabled"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := &Healer{events: record.NewFakeRecorder(10)}
+			h := &Healer{cfg: Config{ForceDelete: !tt.noForce}, events: record.NewFakeRecorder(10)}
 			if err := h.cfg.Tiers.Set(tt.tiers); err != nil {
 				t.Fatal(err)
 			}

@@ -41,7 +41,7 @@ directory immutable, so such a container gets `EPERM` on its first write instead
   restarts only those containers.
 - Deletes the pod when the restart tier fails or does not apply (`restartPolicy`
   other than `Always`) and a controller recreates it, and force deletes pods
-  stuck terminating on a dead mount.
+  stuck terminating on a dead mount unless `-force-delete=false`.
 - Heal tiers can be enabled one by one, down to only reporting dead mounts.
 - Guards the directory underneath each mount with the immutable flag
   (`chattr +i`), which stops even root in the pod: always, only while
@@ -153,6 +153,7 @@ missing fails every write with `EPERM`.
 | The driver is reached but the remount fails | `live` and `restart` fail, the pod is deleted if a controller recreates it | `DeadMount`, `DeletingPod` or `NotHealed` |
 | The pod has no controller and no other tier heals it | nothing, the pod stays as it is | `DeadMount`, `NotHealed` |
 | The pod is stuck terminating on a dead mount | the pod is force deleted | `DeadMount`, `DeletingPod` |
+| The same, with `-force-delete=false` | nothing; the pod stays stuck until its processes exit or someone deletes it | `DeadMount`, `NotHealed` |
 | The pod or container is gone before `-live-timeout` | nothing | none further |
 | `-tiers=` is empty | nothing; the count starts over, so this repeats every `-strikes` checks while the mount stays dead | `DeadMount`, `NotHealed` |
 
@@ -168,6 +169,7 @@ missing fails every write with `EPERM`.
 | `-tiers` | `TIERS` | `live,restart,delete` | [heal tiers](#heal-tiers) to use; empty only reports |
 | `-live-timeout` | `LIVE_TIMEOUT` | `1m` | how long a container swapped by the live tier may hold handles on the dead mount before it is escalated to the next tier; `0` disables the escalation |
 | `-delete-on-driver-down` | `DELETE_ON_DRIVER_DOWN` | `false` | escalate a dead volume whose driver cannot be reached, which ends at the delete tier, instead of healing it again at the next check |
+| `-force-delete` | `FORCE_DELETE` | `true` | force delete a pod stuck terminating on a dead mount; its processes may outlive the grace period while a controller already starts the replacement |
 | `-guard` | `GUARD` | `always` | `always`: every mount of a started pod; `remount`: only while remounting; `off` |
 | `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/containerd.sock` | container runtime socket |
