@@ -49,7 +49,7 @@ jobs:
           fetch-depth: 0
       - uses: azure/setup-helm@v5
       - run: helm lint charts/csi-mount-healer
-      - run: helm template ci charts/csi-mount-healer --set config.interval=2m --set config.selector='driver in (a,b)' > /dev/null
+      - run: helm template ci charts/csi-mount-healer --set config.interval=2m --set config.selector='driver in (a\,b)' > /dev/null
       - uses: helm/chart-testing-action@v2
       # The released chart version comes from the git tag, not Chart.yaml, so
       # demanding a version bump per chart change would be asking for a no-op edit.
