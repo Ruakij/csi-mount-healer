@@ -3,12 +3,14 @@
 package healer
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/unix"
+	"k8s.io/klog/v2"
 )
 
 // fsImmutableFL is FS_IMMUTABLE_FL from linux/fs.h, which x/sys does not export.
@@ -90,4 +92,43 @@ func stagingBinds() (map[string]bool, error) {
 		binds[m.point] = strings.Contains(m.root, "/plugins/kubernetes.io/csi/") && strings.HasSuffix(m.root, "/globalmount")
 	}
 	return binds, nil
+}
+
+// watchMounts signals on the returned channel whenever the mount table changes,
+// coalescing changes that arrive faster than they are received.
+func watchMounts(ctx context.Context) <-chan struct{} {
+	ch := make(chan struct{}, 1)
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		klog.Warningf("watching mounts, checking only every interval: %v", err)
+		return nil
+	}
+	go func() {
+		defer f.Close()
+		buf := make([]byte, 64<<10)
+		for ctx.Err() == nil {
+			// Reading to the end arms the next POLLPRI.
+			for {
+				if n, err := f.Read(buf); n == 0 || err != nil {
+					break
+				}
+			}
+			if _, err := f.Seek(0, 0); err != nil {
+				klog.Warningf("watching mounts: %v", err)
+				return
+			}
+			fds := []unix.PollFd{{Fd: int32(f.Fd()), Events: unix.POLLPRI}}
+			// The timeout only lets the loop notice ctx.
+			if n, err := unix.Poll(fds, 1000); err != nil && !errors.Is(err, unix.EINTR) {
+				klog.Warningf("watching mounts: %v", err)
+				return
+			} else if n > 0 && fds[0].Revents&unix.POLLPRI != 0 {
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	return ch
 }

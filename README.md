@@ -151,7 +151,9 @@ each against its own limit, and `0` never escalates.
 ### Outcomes
 
 With the default settings, a mount that dies is healed at its third failed
-check in a row, 2 to 3 minutes later. Until then, a guarded mount that is
+check in a row, 2 to 3 minutes later. A mount that disappears is checked at
+once, as is every change to the node's mount table, so it is healed 2 minutes
+later. Until then, a guarded mount that is
 missing fails every write with `EPERM`.
 
 Some drivers repair their own mounts: they keep the FUSE daemon alive outside

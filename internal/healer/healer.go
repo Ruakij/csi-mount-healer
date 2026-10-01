@@ -169,7 +169,9 @@ func (h *Healer) Run(ctx context.Context) error {
 	// Also clears what a previous run in another mode left behind.
 	h.sweep("*")
 
-	every(ctx, h.cfg.Interval, func() {
+	// A mount that appears or disappears is checked at once rather than at the
+	// next tick; the strikes after it still come an interval apart.
+	every(ctx, h.cfg.Interval, watchMounts(ctx), func() {
 		// Retries guards that failed to set on a pod update.
 		if h.cfg.Guard == GuardAlways || h.cfg.GuardStage {
 			h.sweep("*")
@@ -192,7 +194,8 @@ func indexByUID(obj any) ([]string, error) {
 	return []string{string(obj.(*corev1.Pod).UID)}, nil
 }
 
-func every(ctx context.Context, interval time.Duration, fn func()) {
+// every runs fn each interval, and at once on wake, which restarts the interval.
+func every(ctx context.Context, interval time.Duration, wake <-chan struct{}, fn func()) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -201,6 +204,9 @@ func every(ctx context.Context, interval time.Duration, fn func()) {
 			return
 		case <-t.C:
 			fn()
+		case <-wake:
+			fn()
+			t.Reset(interval)
 		}
 	}
 }

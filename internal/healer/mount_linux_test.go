@@ -303,3 +303,24 @@ func TestStagingBinds(t *testing.T) {
 		t.Error("bind of the live staging mount reported as bare")
 	}
 }
+
+func TestWatchMounts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wake := watchMounts(ctx)
+	expect := func(what string) {
+		t.Helper()
+		select {
+		case <-wake:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("no wake on %s", what)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "m")
+	mountTmpfs(t, path)
+	expect("mount")
+	if err := detach(path); err != nil {
+		t.Fatal(err)
+	}
+	expect("unmount")
+}

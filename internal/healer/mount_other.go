@@ -3,6 +3,7 @@
 package healer
 
 import (
+	"context"
 	"errors"
 	"runtime"
 	"time"
@@ -27,3 +28,5 @@ func swapMounts(int, []liveMount) (uint64, map[uint64]bool, error) {
 func staleHandles(int, uint64, map[uint64]bool, time.Duration) (int, []string, error) {
 	return 0, nil, errUnsupported
 }
+
+func watchMounts(context.Context) <-chan struct{} { return nil }
