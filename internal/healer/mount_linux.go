@@ -98,26 +98,28 @@ func stagingBinds() (map[string]bool, error) {
 // coalescing changes that arrive faster than they are received.
 func watchMounts(ctx context.Context) <-chan struct{} {
 	ch := make(chan struct{}, 1)
-	f, err := os.Open("/proc/self/mountinfo")
+	// A raw fd keeps the file out of the Go netpoller, whose epoll would
+	// consume the POLLPRI edge before unix.Poll sees it.
+	fd, err := unix.Open("/proc/self/mountinfo", unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		klog.Warningf("watching mounts, checking only every interval: %v", err)
 		return nil
 	}
 	go func() {
-		defer f.Close()
+		defer unix.Close(fd)
 		buf := make([]byte, 64<<10)
 		for ctx.Err() == nil {
 			// Reading to the end arms the next POLLPRI.
 			for {
-				if n, err := f.Read(buf); n == 0 || err != nil {
+				if n, err := unix.Read(fd, buf); n == 0 || err != nil {
 					break
 				}
 			}
-			if _, err := f.Seek(0, 0); err != nil {
+			if _, err := unix.Seek(fd, 0, 0); err != nil {
 				klog.Warningf("watching mounts: %v", err)
 				return
 			}
-			fds := []unix.PollFd{{Fd: int32(f.Fd()), Events: unix.POLLPRI}}
+			fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLPRI}}
 			// The timeout only lets the loop notice ctx.
 			if n, err := unix.Poll(fds, 1000); err != nil && !errors.Is(err, unix.EINTR) {
 				klog.Warningf("watching mounts: %v", err)
