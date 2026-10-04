@@ -26,7 +26,7 @@ func swapMounts(pid int, mounts []liveMount) (uint64, map[uint64]bool, error) {
 		return 0, nil, err
 	}
 	// Mount points relative to the root of pid, which is the root of its namespace.
-	infos, err := readMountinfo(pid)
+	infos, err := readMountinfo(fmt.Sprintf("/proc/%d", pid))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -65,7 +65,8 @@ func swapMounts(pid int, mounts []liveMount) (uint64, map[uint64]bool, error) {
 	errc := make(chan error, 1)
 	go func() {
 		// Never unlocked: the thread leaves the namespace of the healer, so the
-		// runtime discards it when the goroutine exits.
+		// runtime discards it when the goroutine exits, or wedges it if it is the
+		// main thread, whose /proc/self then shows the container namespace.
 		runtime.LockOSThread()
 		errc <- func() error {
 			// setns into a mount namespace fails for a thread sharing fs_struct.
@@ -151,8 +152,8 @@ type mountInfo struct {
 
 var mountinfoUnescaper = strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
 
-func readMountinfo(pid int) ([]mountInfo, error) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/mountinfo", pid))
+func readMountinfo(proc string) ([]mountInfo, error) {
+	b, err := os.ReadFile(proc + "/mountinfo")
 	if err != nil {
 		return nil, err
 	}

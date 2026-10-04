@@ -5,7 +5,6 @@ package healer
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -83,7 +82,9 @@ func setImmutable(path string, on bool) error {
 // written there lands on the node disk. A bind of a live staging mount shows
 // the root of the staged filesystem instead.
 func stagingBinds() (map[string]bool, error) {
-	infos, err := readMountinfo(os.Getpid())
+	// Not /proc/self: that is the main thread, which swapMounts may have left in
+	// the namespace of a container.
+	infos, err := readMountinfo("/proc/thread-self")
 	if err != nil {
 		return nil, err
 	}
@@ -98,9 +99,10 @@ func stagingBinds() (map[string]bool, error) {
 // coalescing changes that arrive faster than they are received.
 func watchMounts(ctx context.Context) <-chan struct{} {
 	ch := make(chan struct{}, 1)
+	// thread-self for the same reason as in stagingBinds.
 	// A raw fd keeps the file out of the Go netpoller, whose epoll would
 	// consume the POLLPRI edge before unix.Poll sees it.
-	fd, err := unix.Open("/proc/self/mountinfo", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open("/proc/thread-self/mountinfo", unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		klog.Warningf("watching mounts, checking only every interval: %v", err)
 		return nil
