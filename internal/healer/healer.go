@@ -83,7 +83,7 @@ type Healer struct {
 	prober  *prober
 	pods    cache.Indexer
 	events  record.EventRecorder
-	strikes map[string]int
+	strikes map[string]strike
 	// failed counts the heals in a row of a pod that failed to remount.
 	failed map[types.UID]int
 	// down are the drivers found down during the current scan, by name.
@@ -115,7 +115,7 @@ func New(cfg Config) (*Healer, error) {
 	if cfg.Selector == nil {
 		cfg.Selector = labels.Everything()
 	}
-	h := &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]int{}, failed: map[types.UID]int{}}
+	h := &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]strike{}, failed: map[types.UID]int{}}
 	h.stale = func(s *swap) (int, []string, error) { return staleHandles(s.pid, s.ns, s.dead, cfg.StatTimeout) }
 	return h, nil
 }
@@ -170,13 +170,13 @@ func (h *Healer) Run(ctx context.Context) error {
 	h.sweep("*")
 
 	// A mount that appears or disappears is checked at once rather than at the
-	// next tick; the strikes after it still come an interval apart.
-	every(ctx, h.cfg.Interval, watchMounts(ctx), func() {
+	// next tick.
+	every(ctx, h.cfg.Interval, settle, watchMounts(ctx), func() bool {
 		// Retries guards that failed to set on a pod update.
 		if h.cfg.Guard == GuardAlways || h.cfg.GuardStage {
 			h.sweep("*")
 		}
-		h.scan(ctx)
+		return h.scan(ctx)
 	})
 
 	h.mu.Lock()
@@ -194,21 +194,59 @@ func indexByUID(obj any) ([]string, error) {
 	return []string{string(obj.(*corev1.Pod).UID)}, nil
 }
 
-// every runs fn each interval, and at once on wake, which restarts the interval.
-func every(ctx context.Context, interval time.Duration, wake <-chan struct{}, fn func()) {
+// settle is how long a mount has to stay dead before its first strike. Kubelet
+// unmounts a finished pod before its status reaches the API, so a mount gone
+// during that window would otherwise look dead.
+const settle = 5 * time.Second
+
+// every runs fn on wake and each interval, which a wake restarts, and again
+// after settle when fn asks for a recheck.
+func every(ctx context.Context, interval, settle time.Duration, wake <-chan struct{}, fn func() (recheck bool)) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	var recheck <-chan time.Time
+	run := func() {
+		if fn() && recheck == nil {
+			recheck = time.After(settle)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			fn()
+			run()
 		case <-wake:
-			fn()
+			run()
 			t.Reset(interval)
+		case <-recheck:
+			recheck = nil
+			run()
 		}
 	}
+}
+
+// strike is how many checks in a row found a mount dead, when the first of them
+// did, and when the last strike counted.
+type strike struct {
+	n         int
+	first, at time.Time
+}
+
+// strike records a failed check of target and returns the strikes so far. The
+// first strike needs the mount dead for settle, each one after it half an
+// interval more, so the strikes stand for time however often checks run.
+func (h *Healer) strike(target string, now time.Time) int {
+	s, ok := h.strikes[target]
+	switch {
+	case !ok:
+		s.first = now
+	case s.n == 0 && now.Sub(s.first) >= settle, s.n > 0 && now.Sub(s.at) >= h.cfg.Interval/2:
+		s.n++
+		s.at = now
+	}
+	h.strikes[target] = s
+	return s.n
 }
 
 // volume is one CSI mount of a pod, as kubelet laid it out on disk.
@@ -306,7 +344,8 @@ func (h *Healer) guardStages(enabled bool) {
 	}
 }
 
-func (h *Healer) scan(ctx context.Context) {
+// scan reports whether a mount waits for its first strike.
+func (h *Healer) scan(ctx context.Context) (recheck bool) {
 	h.down = map[string]error{}
 	seen := map[string]bool{}
 	due := map[types.UID][]volume{}
@@ -330,14 +369,21 @@ func (h *Healer) scan(ctx context.Context) {
 			delete(h.strikes, v.target)
 			continue
 		}
-		h.strikes[v.target]++
+		prev := h.strikes[v.target].n
+		n := h.strike(v.target, time.Now())
+		if n == 0 {
+			recheck = true
+		}
+		if n == prev {
+			continue
+		}
 		klog.Warningf("pod %s/%s volume %s: %s (strike %d/%d)",
-			pod.Namespace, pod.Name, filepath.Base(v.dir), reason, h.strikes[v.target], h.cfg.Strikes)
-		if h.strikes[v.target] == h.cfg.Strikes {
+			pod.Namespace, pod.Name, filepath.Base(v.dir), reason, n, h.cfg.Strikes)
+		if n == h.cfg.Strikes {
 			h.events.Eventf(pod, corev1.EventTypeWarning, "DeadMount", "Volume %s: %s, %d checks in a row",
 				filepath.Base(v.dir), reason, h.cfg.Strikes)
 		}
-		if h.strikes[v.target] >= h.cfg.Strikes {
+		if n >= h.cfg.Strikes {
 			due[pod.UID] = append(due[pod.UID], v)
 		}
 	}
@@ -361,6 +407,7 @@ func (h *Healer) scan(ctx context.Context) {
 			delete(h.strikes, v.target)
 		}
 	}
+	return recheck
 }
 
 // deadReason says why a mount counts as dead, or "" when it does not.

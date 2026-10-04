@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -180,5 +181,54 @@ func TestHealAttempts(t *testing.T) {
 				t.Errorf("pod deleted = %v, want %v", deleted, tt.heals > 0)
 			}
 		})
+	}
+}
+
+func TestEveryRechecks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wake := make(chan struct{})
+	runs := make(chan bool, 10)
+	recheck := true
+	go every(ctx, time.Hour, 50*time.Millisecond, wake, func() bool {
+		runs <- recheck
+		r := recheck
+		recheck = false
+		return r
+	})
+	wake <- struct{}{}
+	if r := <-runs; !r {
+		t.Fatal("first run did not ask for a recheck")
+	}
+	select {
+	case <-runs:
+	case <-time.After(time.Second):
+		t.Fatal("no recheck after settle")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if len(runs) != 0 {
+		t.Fatalf("%d runs without a wake or recheck", len(runs))
+	}
+}
+
+func TestStrikeSpacing(t *testing.T) {
+	h := &Healer{cfg: Config{Interval: time.Minute}, strikes: map[string]strike{}}
+	now := time.Now()
+	steps := []struct {
+		after time.Duration
+		want  int
+	}{
+		{0, 0},
+		{time.Second, 0},
+		{settle, 1},
+		{20 * time.Second, 1},
+		{time.Minute + settle, 2},
+		{time.Minute + 29*time.Second, 2},
+		{2*time.Minute + settle, 3},
+	}
+	for _, s := range steps {
+		if got := h.strike("t", now.Add(s.after)); got != s.want {
+			t.Errorf("after %v: %d strikes, want %d", s.after, got, s.want)
+		}
 	}
 }

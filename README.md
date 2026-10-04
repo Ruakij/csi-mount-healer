@@ -152,8 +152,11 @@ each against its own limit, and `0` never escalates.
 
 With the default settings, a mount that dies is healed at its third failed
 check in a row, 2 to 3 minutes later. A mount that disappears is checked at
-once, as is every change to the node's mount table, so it is healed 2 minutes
-later. Until then, a guarded mount that is
+once, as is every change to the node's mount table, so it is healed about 2
+minutes later. A dead mount gets its first strike only after it stays dead for
+5 seconds, which lets kubelet report a pod that finished before its deliberate
+unmount counts. Checks closer together than half `-interval` count as one
+strike, so the strikes always stand for time. Until then, a guarded mount that is
 missing fails every write with `EPERM`.
 
 Some drivers repair their own mounts: they keep the FUSE daemon alive outside
