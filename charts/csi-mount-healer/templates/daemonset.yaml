@@ -73,8 +73,11 @@ spec:
             - name: kubelet
               mountPath: {{ $kubeletRoot }}
               mountPropagation: Bidirectional
+            # The directory, not the socket: a file bind mount stays on the inode
+            # of the socket the runtime had when the pod started, and every
+            # runtime restart replaces it.
             - name: cri
-              mountPath: {{ .Values.criSocket }}
+              mountPath: {{ dir .Values.criSocket }}
       volumes:
         - name: kubelet
           hostPath:
@@ -82,5 +85,5 @@ spec:
             type: Directory
         - name: cri
           hostPath:
-            path: {{ .Values.criSocket }}
-            type: Socket
+            path: {{ dir .Values.criSocket }}
+            type: Directory
