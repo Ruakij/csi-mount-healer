@@ -96,6 +96,8 @@ func (h *Healer) escalate(pod *corev1.Pod, from Tier, why string, try func(t Tie
 		if err == nil {
 			return
 		}
+		klog.Warningf("pod %s/%s: the %s tier failed: %v", pod.Namespace, pod.Name, t, err)
+		h.events.Eventf(pod, corev1.EventTypeWarning, "TierFailed", "The %s tier failed to heal the dead mount: %v", t, err)
 		why, from = fmt.Sprintf("the %s tier failed: %v", t, err), t+1
 	}
 }

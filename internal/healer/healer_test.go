@@ -163,7 +163,8 @@ func TestHealAttempts(t *testing.T) {
 					t.Fatalf("heal %d: healed = %v, want %v", i, healed, escalated)
 				}
 				if i == tt.heals {
-					want = append(want, "DeletingPod")
+					// The live and restart tiers both need the remount.
+					want = append(want, "TierFailed", "TierFailed", "DeletingPod")
 					break
 				}
 				want = append(want, retry)

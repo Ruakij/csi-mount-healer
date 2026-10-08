@@ -112,13 +112,26 @@ func TestEscalate(t *testing.T) {
 			if !slices.Equal(tried, tt.tried) {
 				t.Errorf("tried %v, want %v", tried, tt.tried)
 			}
+			var events []string
+			for len(h.events.(*record.FakeRecorder).Events) > 0 {
+				events = append(events, <-h.events.(*record.FakeRecorder).Events)
+			}
+			// Every failed tier is reported at once.
+			var failed []string
+			for _, e := range events {
+				if strings.Contains(e, "TierFailed") {
+					failed = append(failed, e)
+				}
+			}
+			if want := len(slices.DeleteFunc(slices.Clone(tried), func(t Tier) bool { return !slices.Contains(tt.fail, t) })); len(failed) != want {
+				t.Errorf("TierFailed events %q, want %d", failed, want)
+			}
 			// The NotHealed event carries the reason when every tier was passed.
 			if len(tt.why) > len(tried) {
-				select {
-				case e := <-h.events.(*record.FakeRecorder).Events:
-					whys = append(whys, e)
-				default:
-					t.Error("no NotHealed event")
+				if len(events) == 0 || !strings.Contains(events[len(events)-1], "NotHealed") {
+					t.Errorf("no NotHealed event in %q", events)
+				} else {
+					whys = append(whys, events[len(events)-1])
 				}
 			}
 			for i, want := range tt.why {
