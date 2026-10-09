@@ -105,8 +105,27 @@ func (h *Healer) swapContainer(ctx context.Context, rt runtimeapi.RuntimeService
 		return nil, errors.New("no pid in the verbose container status")
 	}
 	s.pid = info.Pid
-	s.ns, s.dead, err = swapMounts(s.pid, mounts)
+	// With hostPID, pid 1 is the init of the node.
+	s.ns, s.dead, err = swapMounts(s.pid, mounts, mountSources(resp.GetStatus().GetMounts()), "/proc/1/ns/mnt")
 	return s, err
+}
+
+// mountSources maps each container path the runtime bound to its source on the
+// node. Of mounts stacked on one path the last one is on top, as in mountinfo.
+func mountSources(mounts []*runtimeapi.Mount) map[string]liveMount {
+	sources := map[string]liveMount{}
+	for _, m := range mounts {
+		p := corev1.MountPropagationNone
+		switch m.GetPropagation() {
+		case runtimeapi.MountPropagation_PROPAGATION_HOST_TO_CONTAINER:
+			p = corev1.MountPropagationHostToContainer
+		case runtimeapi.MountPropagation_PROPAGATION_BIDIRECTIONAL:
+			p = corev1.MountPropagationBidirectional
+		}
+		src := liveMount{target: m.GetHostPath(), path: path.Clean(m.GetContainerPath()), readOnly: m.GetReadonly(), propagation: &p}
+		sources[src.path] = src
+	}
+	return sources
 }
 
 // escalateContainer sends one container the live tier did not heal on to the

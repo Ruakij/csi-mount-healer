@@ -21,7 +21,7 @@ func setImmutable(string, bool) error { return errUnsupported }
 
 func DropPrivileges() error { return errUnsupported }
 
-func swapMounts(int, []liveMount) (uint64, map[uint64]bool, error) {
+func swapMounts(int, []liveMount, map[string]liveMount, string) (uint64, map[uint64]bool, error) {
 	return 0, nil, errUnsupported
 }
 

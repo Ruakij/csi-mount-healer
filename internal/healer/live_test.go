@@ -3,6 +3,7 @@ package healer
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 func TestSwapTimeout(t *testing.T) {
@@ -89,6 +91,84 @@ func TestSwapTimeout(t *testing.T) {
 			_, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 			if deleted := err != nil; deleted != tt.deleted {
 				t.Errorf("pod deleted = %v, want %v", deleted, tt.deleted)
+			}
+		})
+	}
+}
+
+func TestMountSources(t *testing.T) {
+	const pod = "/var/lib/kubelet/pods/0b6c5a8e-2f1d-4c3a-9e7b-5d4f3a2b1c0d"
+	csi, emptyDir := pod+"/volumes/kubernetes.io~csi/pvc-4f1e/mount", pod+"/volumes/kubernetes.io~empty-dir/logs"
+	subPath := pod + "/volume-subpaths/crowdsec-profiles-volume/crowdsec-lapi/3"
+	type src struct {
+		target, path string
+		readOnly     bool
+		propagation  corev1.MountPropagationMode
+	}
+	tests := []struct {
+		name   string
+		mounts []*runtimeapi.Mount
+		want   map[string]src
+	}{
+		{name: "nil"},
+		{name: "empty", mounts: []*runtimeapi.Mount{}},
+		{
+			name: "emptyDir below a volume",
+			mounts: []*runtimeapi.Mount{
+				{ContainerPath: "/config", HostPath: csi},
+				{ContainerPath: "/config/logs", HostPath: emptyDir},
+			},
+			want: map[string]src{
+				"/config":      {csi, "/config", false, corev1.MountPropagationNone},
+				"/config/logs": {emptyDir, "/config/logs", false, corev1.MountPropagationNone},
+			},
+		},
+		{
+			name:   "read-only subPath file",
+			mounts: []*runtimeapi.Mount{{ContainerPath: "/etc/crowdsec_data/profiles.yaml", HostPath: subPath, Readonly: true}},
+			want: map[string]src{
+				"/etc/crowdsec_data/profiles.yaml": {subPath, "/etc/crowdsec_data/profiles.yaml", true, corev1.MountPropagationNone},
+			},
+		},
+		{
+			name: "propagation",
+			mounts: []*runtimeapi.Mount{
+				{ContainerPath: "/private", HostPath: csi, Propagation: runtimeapi.MountPropagation_PROPAGATION_PRIVATE},
+				{ContainerPath: "/slave", HostPath: csi, Propagation: runtimeapi.MountPropagation_PROPAGATION_HOST_TO_CONTAINER},
+				{ContainerPath: "/shared", HostPath: csi, Propagation: runtimeapi.MountPropagation_PROPAGATION_BIDIRECTIONAL},
+			},
+			want: map[string]src{
+				"/private": {csi, "/private", false, corev1.MountPropagationNone},
+				"/slave":   {csi, "/slave", false, corev1.MountPropagationHostToContainer},
+				"/shared":  {csi, "/shared", false, corev1.MountPropagationBidirectional},
+			},
+		},
+		{
+			name:   "unclean container path",
+			mounts: []*runtimeapi.Mount{{ContainerPath: "/config//logs/", HostPath: emptyDir}},
+			want:   map[string]src{"/config/logs": {emptyDir, "/config/logs", false, corev1.MountPropagationNone}},
+		},
+		{
+			name: "stacked mounts, the last on top",
+			mounts: []*runtimeapi.Mount{
+				{ContainerPath: "/config/logs", HostPath: emptyDir},
+				{ContainerPath: "/config/logs/", HostPath: subPath, Readonly: true},
+			},
+			want: map[string]src{"/config/logs": {subPath, "/config/logs", true, corev1.MountPropagationNone}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := map[string]src{}
+			for k, m := range mountSources(tt.mounts) {
+				if m.propagation == nil || m.subPath != "" {
+					t.Errorf("%s: propagation %v, subPath %q", k, m.propagation, m.subPath)
+					continue
+				}
+				got[k] = src{m.target, m.path, m.readOnly, *m.propagation}
+			}
+			if !maps.Equal(got, tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
 	}

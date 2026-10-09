@@ -120,7 +120,7 @@ event. With `-tiers=` empty, dead mounts are only reported.
 
 | Tier | What happens | Advantages | Disadvantages | Skipped when |
 |---|---|---|---|---|
-| `live` | the volume is remounted through its driver, and the new mount replaces the dead one inside each running container that uses it | the pod keeps everything, including the memory of every process | open files, working directories and mapped files on the dead mount stay broken; needs `hostPID` and Linux 5.12 | per container: a `subPathExpr`, another mount below the mount path, or a failed swap |
+| `live` | the volume is remounted through its driver, and the new mount replaces the dead one inside each running container that uses it | the pod keeps everything, including the memory of every process | open files, working directories and mapped files on the dead mount stay broken; needs `hostPID` and Linux 5.12 | per container: a `subPathExpr`, a mount below the mount path that the runtime did not make or whose mount point is missing in the new mount, or a failed swap |
 | `restart` | the volume is remounted, and the containers that use it are stopped for kubelet to start them again | the pod keeps its IP, its place on the node and every container that does not use the volume | the restarted containers lose their memory and are down until they start again | `restartPolicy` is not `Always`, or the pod is terminating |
 | `delete` | the pod is deleted, and force deleted when it is already terminating | works whatever state the mount or driver is in | everything is lost; the new pod may land on another node with a new IP; a force deleted pod's processes may outlive it next to the replacement | the pod has no controller to recreate it (no `ownerReferences`) and is not terminating |
 
@@ -249,7 +249,16 @@ which have no environment variables.
    subPath) with `open_tree`, read-only if the volumeMount is, and enters the
    mount namespace of the container with `setns` on a thread of its own, which
    is discarded afterwards. There it lazily unmounts the dead mount and moves
-   the clone in with `move_mount`.
+   the clone in with `move_mount`. Mounts right below the dead one, such as an
+   emptyDir or a subPath file inside the volume, are made again on the new
+   mount from their source on the node, as the CRI container status reports
+   it: a recursive `open_tree` clone of the host path, made in the mount
+   namespace of the node (that of pid 1) on another discarded thread, and moved
+   onto the new mount after it. A lookup through the dead mount would detach
+   them, so their paths in the container are never touched. A mount below that
+   the runtime does not know, made by the app or by propagation, or a mount
+   point missing in the new mount fails the swap before any change, and the
+   container goes to the next tier.
 7. Handles on the dead mount (open files, working or root directories, mapped
    files) are counted across every process in the mount namespace of the
    container: `mnt_id` in `/proc/<pid>/fdinfo`, which never touches the file,
