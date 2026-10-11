@@ -45,6 +45,7 @@ func main() {
 	flag.StringVar(&guard, "guard", string(healer.GuardAlways), "make the directory underneath a mount immutable: always | remount | off")
 	flag.BoolVar(&cfg.GuardStage, "guard-stage", false, "also make the staging directory of a volume in use immutable; breaks drivers that remove it while pods use the volume")
 	flag.StringVar(&selector, "selector", "", "label selector over the pod labels plus namespace and driver, picking the volumes to check, heal and guard; empty picks all")
+	flag.BoolVar(&cfg.CheckContainers, "check-containers", true, "also check the copy of every healthy volume in each container that mounts it, which catches copies that are dead while the kubelet path is healthy, e.g. when a driver remounts the kubelet path under running pods; costs a CRI listing and one probe per volume mount of every container on each check")
 	flag.StringVar(&cfg.CRIEndpoint, "cri-endpoint", "unix:///run/containerd/containerd.sock", "container runtime socket, used to restart containers after a remount")
 
 	if err := applyEnv(flag.CommandLine, os.LookupEnv); err != nil {

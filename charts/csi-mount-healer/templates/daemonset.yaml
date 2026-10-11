@@ -25,8 +25,8 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "csi-mount-healer.serviceAccountName" . }}
-      # The live tier finds container processes by the pids the CRI reports, and
-      # enters their mount namespaces through /proc.
+      # The live tier and check-containers find container processes by the pids
+      # the CRI reports, and reach their mount namespaces and roots through /proc.
       hostPID: true
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . }}

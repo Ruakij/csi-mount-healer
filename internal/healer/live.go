@@ -39,11 +39,11 @@ type swap struct {
 	dead map[uint64]bool
 }
 
-// live swaps the remounted volumes into the running containers that mount
-// them. A container it cannot swap is escalated to the next tier on its own.
-func (h *Healer) live(ctx context.Context, pod *corev1.Pod, podVolumes map[string]string) error {
-	containers := containersUsing(pod, podVolumes)
-	if len(containers) == 0 {
+// live swaps the current mounts on the node of the volumes that are dead for a
+// container into the running container. A container it cannot swap is escalated
+// to the next tier on its own.
+func (h *Healer) live(ctx context.Context, pod *corev1.Pod, dead containerVolumes) error {
+	if len(dead) == 0 {
 		return nil
 	}
 	conn, err := dial(h.cfg.CRIEndpoint)
@@ -56,13 +56,16 @@ func (h *Healer) live(ctx context.Context, pod *corev1.Pod, podVolumes map[strin
 	if err != nil {
 		return err
 	}
-	for _, c := range containers {
+	for _, c := range longRunning(pod) {
+		if len(dead[c.Name]) == 0 {
+			continue
+		}
 		ctr := running[c.Name]
 		if ctr == nil {
 			// kubelet starts it on the new mount.
 			continue
 		}
-		s, err := h.swapContainer(ctx, rt, ctr.GetId(), c, podVolumes)
+		s, err := h.swapContainer(ctx, rt, ctr.GetId(), c, dead[c.Name])
 		if err != nil {
 			h.escalateContainer(ctx, pod, c.Name, fmt.Sprintf("swapping the new mount into it failed: %v", err))
 			continue
@@ -74,11 +77,11 @@ func (h *Healer) live(ctx context.Context, pod *corev1.Pod, podVolumes map[strin
 	return nil
 }
 
-func (h *Healer) swapContainer(ctx context.Context, rt runtimeapi.RuntimeServiceClient, id string, c corev1.Container, podVolumes map[string]string) (*swap, error) {
+func (h *Healer) swapContainer(ctx context.Context, rt runtimeapi.RuntimeServiceClient, id string, c corev1.Container, volumes map[string]string) (*swap, error) {
 	s := &swap{}
 	var mounts []liveMount
 	for _, m := range c.VolumeMounts {
-		target := podVolumes[m.Name]
+		target := volumes[m.Name]
 		if target == "" {
 			continue
 		}
@@ -95,19 +98,33 @@ func (h *Healer) swapContainer(ctx context.Context, rt runtimeapi.RuntimeService
 	if err != nil {
 		return nil, fmt.Errorf("container status: %w", err)
 	}
+	if s.pid, err = statusPid(resp); err != nil {
+		return nil, err
+	}
+	// With hostPID, pid 1 is the init of the node.
+	s.ns, s.dead, err = swapMounts(s.pid, mounts, mountSources(resp.GetStatus().GetMounts()), "/proc/1/ns/mnt")
+	if err == nil {
+		// A probe still hung on the old mount says nothing about the new one.
+		for _, m := range mounts {
+			h.prober.forgetIn(s.pid, m.path)
+		}
+	}
+	return s, err
+}
+
+// statusPid returns the pid of the main process of a container from its verbose
+// status.
+func statusPid(resp *runtimeapi.ContainerStatusResponse) (int, error) {
 	var info struct {
 		Pid int `json:"pid"`
 	}
 	if err := json.Unmarshal([]byte(resp.GetInfo()["info"]), &info); err != nil {
-		return nil, fmt.Errorf("verbose container status: %w", err)
+		return 0, fmt.Errorf("verbose container status: %w", err)
 	}
 	if info.Pid == 0 {
-		return nil, errors.New("no pid in the verbose container status")
+		return 0, errors.New("no pid in the verbose container status")
 	}
-	s.pid = info.Pid
-	// With hostPID, pid 1 is the init of the node.
-	s.ns, s.dead, err = swapMounts(s.pid, mounts, mountSources(resp.GetStatus().GetMounts()), "/proc/1/ns/mnt")
-	return s, err
+	return info.Pid, nil
 }
 
 // mountSources maps each container path the runtime bound to its source on the

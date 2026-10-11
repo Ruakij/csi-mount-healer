@@ -5,6 +5,7 @@ package healer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -19,14 +20,37 @@ const fsImmutableFL = 0x10
 // catches bind mounts from the same filesystem, which comparing st_dev with the
 // parent would miss.
 func stat(path string) (mountRoot bool, err error) {
+	return statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW)
+}
+
+func statx(dirfd int, path string, flags int) (mountRoot bool, err error) {
 	var st unix.Statx_t
-	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, unix.STATX_BASIC_STATS, &st); err != nil {
+	if err := unix.Statx(dirfd, path, flags, unix.STATX_BASIC_STATS, &st); err != nil {
 		return false, err
 	}
 	if st.Attributes_mask&unix.STATX_ATTR_MOUNT_ROOT == 0 {
 		return false, errors.New("kernel does not report STATX_ATTR_MOUNT_ROOT (needs 5.8+)")
 	}
 	return st.Attributes&unix.STATX_ATTR_MOUNT_ROOT != 0, nil
+}
+
+// statInRoot is stat for path as the process pid sees it. Symlinks resolve
+// inside its root, so one in the image cannot lead out to the healer.
+func statInRoot(pid int, path string) (mountRoot bool, err error) {
+	root, err := unix.Open(fmt.Sprintf("/proc/%d/root", pid), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", errNoRoot, err)
+	}
+	defer unix.Close(root)
+	// O_PATH does not call into the filesystem, so a dead mount only fails the statx.
+	fd, err := unix.Openat2(root, path, &unix.OpenHow{
+		Flags: unix.O_PATH | unix.O_CLOEXEC, Resolve: unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS,
+	})
+	if err != nil {
+		return false, err
+	}
+	defer unix.Close(fd)
+	return statx(fd, "", unix.AT_EMPTY_PATH)
 }
 
 // detach lazily unmounts everything stacked on path.

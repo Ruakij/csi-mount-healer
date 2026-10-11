@@ -14,6 +14,7 @@ image:
 #   force-delete: true
 #   guard: always
 #   guard-stage: false
+#   check-containers: true
 #   selector: "driver in (csi.moosefs.com),!csi-mount-healer/skip"
 #   v: 2
 config: {}
@@ -22,7 +23,8 @@ config: {}
 # kubelet and the drivers speak in host paths. k3s and RKE2 use the default.
 kubeletRootDir: /var/lib/kubelet
 
-# Container runtime socket on the node, for the restart and live tiers.
+# Container runtime socket on the node, for the restart and live tiers and
+# check-containers.
 # k3s: /run/k3s/containerd/containerd.sock
 # RKE2: /run/k3s/containerd/containerd.sock
 criSocket: /run/containerd/containerd.sock

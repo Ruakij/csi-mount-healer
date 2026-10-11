@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,6 +80,8 @@ func runChild(path string) error {
 			fmt.Println(errors.Join(err, unix.Mount(args[2], at, "", unix.MS_BIND|unix.MS_REC, "")))
 		case "umount":
 			fmt.Println(unix.Unmount(filepath.Join(path, args[1]), 0))
+		case "chroot":
+			fmt.Println(errors.Join(unix.Chroot(args[1]), os.Chdir("/")))
 		case "cat":
 			b, err := os.ReadFile(filepath.Join(path, args[1]))
 			fmt.Println(string(b), err)
@@ -173,6 +176,62 @@ func startChild(t *testing.T, path string) (*exec.Cmd, func(string) string) {
 		t.Fatalf("child: %q", got)
 	}
 	return cmd, ask
+}
+
+func TestStatInRoot(t *testing.T) {
+	root := t.TempDir()
+	jail := filepath.Join(root, "jail")
+	path := filepath.Join(jail, "data")
+	plain := filepath.Join(jail, "plain")
+	node := filepath.Join(root, "node")
+	for _, dir := range []string{path, plain} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mountTmpfs(t, node)
+	// An absolute symlink and a relative one to the host mount, which resolve
+	// below the root of the container, where they lead nowhere.
+	for name, target := range map[string]string{"abs": node, "rel": "../node", "data": "/data"} {
+		if err := os.Symlink(target, filepath.Join(jail, "link-"+name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The child has a tmpfs at path in its mount namespace only.
+	cmd, ask := startChild(t, path)
+	pid := cmd.Process.Pid
+	if mounted, err := stat(path); err != nil || mounted {
+		t.Fatalf("host sees the mount of the child: %v, %v", mounted, err)
+	}
+	probe := func(in string) (bool, error) {
+		t.Helper()
+		return statInRoot(pid, in)
+	}
+	if mounted, err := probe(path); err != nil || !mounted {
+		t.Errorf("mount of the child: %v, %v; want mounted", mounted, err)
+	}
+	if mounted, err := probe(plain); err != nil || mounted {
+		t.Errorf("plain directory: %v, %v; want not mounted", mounted, err)
+	}
+	if _, err := probe(filepath.Join(jail, "missing")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("missing path: %v, want not exist", err)
+	}
+
+	// Now the root of the child is jail, as a container has its own root.
+	if got := ask("chroot " + jail); got != "<nil>" {
+		t.Fatalf("chroot: %s", got)
+	}
+	for in, want := range map[string]bool{"/data": true, "/plain": false, "/link-data": true, "/../data": true} {
+		if mounted, err := probe(in); err != nil || mounted != want {
+			t.Errorf("%s in the root: %v, %v; want mounted %v", in, mounted, err, want)
+		}
+	}
+	for _, in := range []string{"/missing", "/link-abs", "/link-rel", "/../node", filepath.Join("/", node)} {
+		if mounted, err := probe(in); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s in the root: %v, %v; want not exist", in, mounted, err)
+		}
+	}
 }
 
 func TestLiveSwapNested(t *testing.T) {

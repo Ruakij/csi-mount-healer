@@ -13,6 +13,8 @@ var errUnsupported = errors.New("csi-mount-healer is only supported on linux, no
 
 func stat(string) (bool, error) { return false, errUnsupported }
 
+func statInRoot(int, string) (bool, error) { return false, errUnsupported }
+
 func detach(string) error { return errUnsupported }
 
 func stagingBinds() (map[string]bool, error) { return nil, errUnsupported }

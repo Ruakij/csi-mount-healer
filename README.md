@@ -32,6 +32,10 @@ container gets `EPERM` on its first write instead.
   mounted at all under a running pod, or were published from the bare staging
   directory while the staging mount was gone; heals after several failed checks
   in a row.
+- Checks the copy of each volume inside every container that mounts
+  it (`-check-containers`), which finds containers left on a dead mount while the
+  path on the node is healthy, for example by a driver that mounts that path
+  anew under running pods.
 - Remounts through the node service of the driver with the request kubelet built:
   access mode, fs type, mount options, volume attributes, pod info, secrets,
   publish context, `fsGroup`. Restages first when the staging mount is dead too.
@@ -56,9 +60,9 @@ container gets `EPERM` on its first write instead.
   xfs, btrfs, zfs, ...), for the guard.
 - CSI drivers registered with kubelet through `node-driver-registrar`, with their
   sockets under the kubelet directory.
-- A CRI runtime socket, to restart containers. The live tier reads container
-  pids from the verbose container status, which containerd reports, and needs
-  `hostPID` to reach them through `/proc`.
+- A CRI runtime socket, to restart containers. The live tier and
+  `-check-containers` read container pids from the verbose container status,
+  which containerd reports, and need `hostPID` to reach them through `/proc`.
 
 Raw block volumes and drivers that request service account tokens
 (`CSIDriver.spec.tokenRequests`) are not remounted, so only the delete tier
@@ -90,7 +94,8 @@ the binary drops every capability except `CAP_SYS_ADMIN`,
 `CAP_LINUX_IMMUTABLE`, `CAP_DAC_READ_SEARCH`, `CAP_SYS_PTRACE` and
 `CAP_SYS_CHROOT` at startup and sets `no_new_privs`. The last two are for the
 live tier: reading the `/proc` entries of processes running as other users, and
-`setns` into their mount namespace.
+`setns` into their mount namespace. `-check-containers` needs `CAP_SYS_PTRACE` as
+well.
 
 The ClusterRole can read every secret: kubelet passes node stage and publish
 secrets to the driver, and the healer has to pass the same ones.
@@ -128,6 +133,13 @@ The live tier works per container: a container it cannot swap goes to the next
 tier right away, and so does one whose processes still hold the dead mount
 `-live-timeout` after the swap, with an `Escalating` event. Other containers keep
 their swap. With `-live-timeout=0` a swapped container is never escalated.
+
+A volume that `-check-containers` finds dead in some containers while its path on
+the node is healthy is not remounted through the driver. The tiers act on those
+containers only, and the live tier swaps in the mount that is there. The subPath
+binds that kubelet made of the volume for those containers are detached first, as
+a restart would reuse them. This does not wait for the remount of another volume
+of the pod, nor for its attempts to run out.
 
 Every tier but `delete` needs the remount through the driver. A driver that is
 not registered, refuses the connection or does not answer within 10 seconds
@@ -177,6 +189,7 @@ driver that takes longer, raise `-strikes` or `-interval`.
 | The same, with `-driver-down-attempts` | the pod is deleted if a controller recreates it, at that heal in a row | `DeadMount`, `DriverDown`, then `DeletingPod` or `NotHealed` |
 | The driver is reached but the remount fails | healed again at the next check; the pod is deleted if a controller recreates it at the `-remount-attempts` heal in a row | `DeadMount`, `RemountFailed`, then `DeletingPod` or `NotHealed` |
 | The same, with `-remount-attempts=0` | healed again at every following check | `DeadMount`, `RemountFailed` |
+| `-check-containers` finds the copy of a healthy volume dead in a container | no remount; `live` swaps the current mount into that container only, else it is restarted or the pod deleted as above | `DeadMount`, `Remounted`, or as above |
 | The pod has no controller and no other tier heals it | nothing | `DeadMount`, `NotHealed` |
 | The pod is stuck terminating on a dead mount | force deleted, unless `-force-delete=false` | `DeadMount`, `DeletingPod` or `NotHealed` |
 | `-tiers=` is empty | nothing; repeats every `-strikes` checks while the mount stays dead | `DeadMount`, `NotHealed` |
@@ -207,6 +220,7 @@ Every guard is released when the healer shuts down.
 | `-force-delete` | `FORCE_DELETE` | `true` | force delete a pod stuck terminating on a dead mount |
 | `-guard` | `GUARD` | `always` | [guard](#guards) mode: `always`, `remount` or `off` |
 | `-guard-stage` | `GUARD_STAGE` | `false` | also [guard](#guards) staging directories |
+| `-check-containers` | `CHECK_CONTAINERS` | `true` | also check the copy of each volume in every container that mounts it, which finds copies dead while the path on the node is healthy; costs a CRI listing and a probe per volume mount of every container on each check |
 | `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/`<br>`containerd.sock` | container runtime socket |
 
@@ -231,7 +245,15 @@ which have no environment variables.
    hangs is not repeated until it returns. `STATX_ATTR_MOUNT_ROOT` tells whether
    the path is still mounted, bind mounts from the same filesystem included.
    `/proc/self/mountinfo` tells where a mount was bound from, which shows a
-   publish of the bare `.../globalmount` staging directory.
+   publish of the bare `.../globalmount` staging directory. With
+   `-check-containers`, the copy of each healthy volume in every running container
+   that mounts it is checked the same way, at its `mountPath` resolved inside
+   `/proc/<pid>/root` so that a symlink in the image cannot lead out of the
+   container. A mount below a dead or hung one is not probed, as the lookup
+   through a dead mount detaches the mounts below it; the heal of the dead mount
+   takes them along. The pids come from one CRI listing per check and the verbose
+   status of each container once. A copy that cannot be checked, because the CRI
+   or the root of the container cannot be reached, keeps its strikes as they are.
 3. A mount that fails `-strikes` checks in a row goes to the first
    [heal tier](#heal-tiers) that applies.
 4. The driver is found the way kubelet finds it: by asking each socket in

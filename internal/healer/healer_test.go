@@ -158,7 +158,7 @@ func TestHealAttempts(t *testing.T) {
 			}
 			for i := 1; i <= 4; i++ {
 				h.down = map[string]error{}
-				healed := h.heal(context.Background(), pod, []volume{{podUID: pod.UID, dir: dir, target: filepath.Join(dir, "mount")}})
+				healed := h.heal(context.Background(), pod, &podDue{dead: []volume{{podUID: pod.UID, dir: dir, target: filepath.Join(dir, "mount")}}})
 				if escalated := i == tt.heals; healed != escalated {
 					t.Fatalf("heal %d: healed = %v, want %v", i, healed, escalated)
 				}

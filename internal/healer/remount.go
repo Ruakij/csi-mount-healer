@@ -90,15 +90,8 @@ func (h *Healer) remount(ctx context.Context, pod *corev1.Pod, v volume) (string
 		return "", err
 	}
 
-	// kubelet reuses a subPath bind that still exists, and this one points into
-	// the dead mount. Without it, kubelet binds the new mount on container start.
-	// kubelet names the directory after the inner volume spec name, the PV name
-	// for a PVC, as it does the volume directory.
-	subpaths, _ := filepath.Glob(filepath.Join(h.cfg.KubeletRoot, "pods", string(pod.UID), "volume-subpaths", filepath.Base(v.dir), "*", "*"))
-	for _, p := range subpaths {
-		if err := detach(p); err != nil {
-			return "", fmt.Errorf("detaching subPath %s: %w", p, err)
-		}
+	if err := h.detachSubpaths(pod, filepath.Base(v.dir), "*"); err != nil {
+		return "", err
 	}
 
 	if h.cfg.Guard == GuardRemount {
@@ -107,6 +100,22 @@ func (h *Healer) remount(ctx context.Context, pod *corev1.Pod, v volume) (string
 		}
 	}
 	return reqs.podVolume, nil
+}
+
+// detachSubpaths detaches the subPath binds that kubelet made of the volume
+// directory for the container, or for every container with "*". kubelet reuses a
+// bind that still exists, and these point into the dead mount. Without them,
+// kubelet binds the new mount on container start. kubelet names the directory
+// after the inner volume spec name, the PV name for a PVC, as it does the volume
+// directory.
+func (h *Healer) detachSubpaths(pod *corev1.Pod, volumeDir, container string) error {
+	subpaths, _ := filepath.Glob(filepath.Join(h.cfg.KubeletRoot, "pods", string(pod.UID), "volume-subpaths", volumeDir, container, "*"))
+	for _, p := range subpaths {
+		if err := detach(p); err != nil {
+			return fmt.Errorf("detaching subPath %s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // restage stages the volume again when its staging mount is dead. A live one
@@ -311,39 +320,73 @@ func dial(endpoint string) (*grpc.ClientConn, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 }
 
-// containersUsing lists the containers of the pod that mount one of the pod
-// volumes. Only sidecars among the init containers keep running; the others are
-// done by now.
-func containersUsing(pod *corev1.Pod, podVolumes map[string]string) []corev1.Container {
-	var using []corev1.Container
-	containers := pod.Spec.Containers
+// longRunning lists the containers of the pod that keep running: the regular
+// ones and the sidecars among the init containers, as the others are done by now.
+func longRunning(pod *corev1.Pod) []corev1.Container {
+	containers := slices.Clone(pod.Spec.Containers)
 	for _, c := range pod.Spec.InitContainers {
 		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
 			containers = append(containers, c)
 		}
 	}
-	for _, c := range containers {
-		if slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return podVolumes[m.Name] != "" }) {
-			using = append(using, c)
-		}
-	}
-	return using
+	return containers
 }
 
-// runningContainers maps the names of the running containers of the pod to them.
-func runningContainers(ctx context.Context, rt runtimeapi.RuntimeServiceClient, pod *corev1.Pod) (map[string]*runtimeapi.Container, error) {
+// containersUsing lists the long running containers of the pod that mount one
+// of the pod volumes.
+func containersUsing(pod *corev1.Pod, podVolumes map[string]string) []corev1.Container {
+	return slices.DeleteFunc(longRunning(pod), func(c corev1.Container) bool {
+		return !slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return podVolumes[m.Name] != "" })
+	})
+}
+
+// containerVolumes maps the name of a container to the pod volumes that are dead
+// for it, each to its target on the node.
+type containerVolumes map[string]map[string]string
+
+func (cv containerVolumes) add(container, podVolume, target string) {
+	if cv[container] == nil {
+		cv[container] = map[string]string{}
+	}
+	cv[container][podVolume] = target
+}
+
+// mountedBy returns, for each container, those of podVolumes that it mounts.
+func mountedBy(pod *corev1.Pod, podVolumes map[string]string) containerVolumes {
+	mounted := containerVolumes{}
+	for _, c := range containersUsing(pod, podVolumes) {
+		for _, m := range c.VolumeMounts {
+			if t := podVolumes[m.Name]; t != "" {
+				mounted.add(c.Name, m.Name, t)
+			}
+		}
+	}
+	return mounted
+}
+
+// listRunning lists the running containers with the given labels.
+func listRunning(ctx context.Context, rt runtimeapi.RuntimeServiceClient, selector map[string]string) ([]*runtimeapi.Container, error) {
 	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	resp, err := rt.ListContainers(lctx, &runtimeapi.ListContainersRequest{Filter: &runtimeapi.ContainerFilter{
 		State:         &runtimeapi.ContainerStateValue{State: runtimeapi.ContainerState_CONTAINER_RUNNING},
-		LabelSelector: map[string]string{"io.kubernetes.pod.uid": string(pod.UID)},
+		LabelSelector: selector,
 	}})
 	if err != nil {
 		return nil, fmt.Errorf("listing containers: %w", err)
 	}
+	return resp.GetContainers(), nil
+}
+
+// runningContainers maps the names of the running containers of the pod to them.
+func runningContainers(ctx context.Context, rt runtimeapi.RuntimeServiceClient, pod *corev1.Pod) (map[string]*runtimeapi.Container, error) {
+	listed, err := listRunning(ctx, rt, map[string]string{podUIDLabel: string(pod.UID)})
+	if err != nil {
+		return nil, err
+	}
 	running := map[string]*runtimeapi.Container{}
-	for _, c := range resp.GetContainers() {
-		running[c.GetLabels()["io.kubernetes.container.name"]] = c
+	for _, c := range listed {
+		running[c.GetLabels()[containerNameLabel]] = c
 	}
 	return running, nil
 }

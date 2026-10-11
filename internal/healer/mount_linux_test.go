@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -269,6 +270,37 @@ func TestRemount(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, "x"), nil, 0o644); err != nil {
 			t.Errorf("write underneath %s after the pod stopped: %v", p, err)
 		}
+	}
+}
+
+// The subPath binds of a volume that is dead in one container only are detached
+// for that container, as kubelet would reuse them on its restart.
+func TestHealContainerDetachesSubpaths(t *testing.T) {
+	c := newCopiesTest(t)
+	if err := c.h.cfg.Tiers.Set("restart"); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(c.h.cfg.KubeletRoot, "pods", string(c.pod.UID), "volume-subpaths")
+	gone := filepath.Join(base, "inline", "sidecar", "0")
+	kept := []string{filepath.Join(base, "inline", "app", "0"), filepath.Join(base, "pv-1", "sidecar", "0")}
+	for _, p := range append(kept, gone) {
+		mountTmpfs(t, p)
+	}
+
+	d := &podDue{containers: containerVolumes{"sidecar": {"inline": c.inline.target}}}
+	if !c.h.heal(context.Background(), c.pod, d) {
+		t.Error("heal asks for another try")
+	}
+	if mustStat(t, gone) {
+		t.Error("subPath bind of the container still mounted")
+	}
+	for _, p := range kept {
+		if !mustStat(t, p) {
+			t.Errorf("subPath bind %s detached", p)
+		}
+	}
+	if want := []string{"side-1"}; !slices.Equal(c.cri.stopped, want) {
+		t.Errorf("stopped %v, want %v", c.cri.stopped, want)
 	}
 }
 

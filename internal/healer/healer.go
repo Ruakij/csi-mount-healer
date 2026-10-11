@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,6 +70,10 @@ type Config struct {
 	// to the node disk.
 	GuardStage  bool
 	CRIEndpoint string
+	// CheckContainers also probes the copy of every healthy volume in each
+	// container that mounts it, which costs a CRI listing and a probe per volume
+	// mount of every container on each scan.
+	CheckContainers bool
 	// Selector picks the volumes to check, heal and guard. It matches the labels
 	// of the pod plus namespace and driver, which override pod labels of the same
 	// name. Nil or empty picks every volume.
@@ -87,8 +92,12 @@ type Healer struct {
 	// failed counts the heals in a row of a pod that failed to remount.
 	failed map[types.UID]int
 	// down are the drivers found down during the current scan, by name.
-	down  map[string]error
-	stale func(*swap) (int, []string, error)
+	down map[string]error
+	// pids are the pids of the main processes of running containers, by container ID.
+	pids map[string]int
+	// volumeNames are the pod volume names of the volume directories, by target.
+	volumeNames map[string]string
+	stale       func(*swap) (int, []string, error)
 	// mu serialises changes to mounts and guard flags, so a sweep never guards or
 	// releases a volume halfway through a remount.
 	mu sync.Mutex
@@ -115,7 +124,10 @@ func New(cfg Config) (*Healer, error) {
 	if cfg.Selector == nil {
 		cfg.Selector = labels.Everything()
 	}
-	h := &Healer{cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]strike{}, failed: map[types.UID]int{}}
+	h := &Healer{
+		cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]strike{}, failed: map[types.UID]int{},
+		pids: map[string]int{}, volumeNames: map[string]string{},
+	}
 	h.stale = func(s *swap) (int, []string, error) { return staleHandles(s.pid, s.ns, s.dead, cfg.StatTimeout) }
 	return h, nil
 }
@@ -163,8 +175,8 @@ func (h *Healer) Run(ctx context.Context) error {
 	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 		return ctx.Err()
 	}
-	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, tiers %q, live timeout %v, remount attempts %d, driver down attempts %d, guard %s, guard stage %v, selector %q",
-		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.LiveTimeout, h.cfg.RemountAttempts, h.cfg.DriverDownAttempts, h.cfg.Guard, h.cfg.GuardStage, h.cfg.Selector)
+	klog.Infof("watching CSI mounts on %s: interval %v, strikes %d, tiers %q, live timeout %v, remount attempts %d, driver down attempts %d, guard %s, guard stage %v, check containers %v, selector %q",
+		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.LiveTimeout, h.cfg.RemountAttempts, h.cfg.DriverDownAttempts, h.cfg.Guard, h.cfg.GuardStage, h.cfg.CheckContainers, h.cfg.Selector)
 
 	// Also clears what a previous run in another mode left behind.
 	h.sweep("*")
@@ -233,11 +245,12 @@ type strike struct {
 	first, at time.Time
 }
 
-// strike records a failed check of target and returns the strikes so far. The
-// first strike needs the mount dead for settle, each one after it half an
-// interval more, so the strikes stand for time however often checks run.
-func (h *Healer) strike(target string, now time.Time) int {
-	s, ok := h.strikes[target]
+// strike records a failed check of key, a volume target or a target and a
+// container, and returns the strikes so far. The first strike needs the mount
+// dead for settle, each one after it half an interval more, so the strikes stand
+// for time however often checks run.
+func (h *Healer) strike(key string, now time.Time) int {
+	s, ok := h.strikes[key]
 	switch {
 	case !ok:
 		s.first = now
@@ -245,8 +258,24 @@ func (h *Healer) strike(target string, now time.Time) int {
 		s.n++
 		s.at = now
 	}
-	h.strikes[target] = s
+	h.strikes[key] = s
 	return s.n
+}
+
+// fail records a failed check of key and reports whether its strikes call for
+// a heal now, and whether the first strike is still waiting for settle. where
+// names the volume, and the container if the check was in one.
+func (h *Healer) fail(pod *corev1.Pod, key, where, reason string) (heal, recheck bool) {
+	prev := h.strikes[key].n
+	n := h.strike(key, time.Now())
+	if n == prev {
+		return false, n == 0
+	}
+	klog.Warningf("pod %s/%s volume %s: %s (strike %d/%d)", pod.Namespace, pod.Name, where, reason, n, h.cfg.Strikes)
+	if n == h.cfg.Strikes {
+		h.events.Eventf(pod, corev1.EventTypeWarning, "DeadMount", "Volume %s: %s, %d checks in a row", where, reason, h.cfg.Strikes)
+	}
+	return n >= h.cfg.Strikes, false
 }
 
 // volume is one CSI mount of a pod, as kubelet laid it out on disk.
@@ -344,11 +373,36 @@ func (h *Healer) guardStages(enabled bool) {
 	}
 }
 
+// podDue is what a pod has to heal.
+type podDue struct {
+	// dead are the volumes with a dead publish path, to remount.
+	dead []volume
+	// containers are the volumes that are dead in some containers only, whose
+	// publish path is healthy.
+	containers containerVolumes
+	// keys are the strikes of the dead volumes, to clear once they are healed.
+	keys []string
+	// copyKeys are the strikes of the containers, cleared once the tiers ran for
+	// them, whatever became of the remount.
+	copyKeys []string
+}
+
+type dueMap map[types.UID]*podDue
+
+func (m dueMap) of(pod *corev1.Pod) *podDue {
+	if m[pod.UID] == nil {
+		m[pod.UID] = &podDue{containers: containerVolumes{}}
+	}
+	return m[pod.UID]
+}
+
 // scan reports whether a mount waits for its first strike.
 func (h *Healer) scan(ctx context.Context) (recheck bool) {
 	h.down = map[string]error{}
 	seen := map[string]bool{}
-	due := map[types.UID][]volume{}
+	due := dueMap{}
+	// healthy are the volumes of started pods whose publish path is mounted.
+	healthy := map[*corev1.Pod][]volume{}
 	binds, err := stagingBinds()
 	if err != nil {
 		klog.Warningf("reading mounts: %v", err)
@@ -367,44 +421,74 @@ func (h *Healer) scan(ctx context.Context) (recheck bool) {
 		}
 		if reason == "" {
 			delete(h.strikes, v.target)
+			if h.cfg.CheckContainers && mounted && active(pod) && started(pod) {
+				healthy[pod] = append(healthy[pod], v)
+			}
 			continue
 		}
-		prev := h.strikes[v.target].n
-		n := h.strike(v.target, time.Now())
-		if n == 0 {
-			recheck = true
-		}
-		if n == prev {
-			continue
-		}
-		klog.Warningf("pod %s/%s volume %s: %s (strike %d/%d)",
-			pod.Namespace, pod.Name, filepath.Base(v.dir), reason, n, h.cfg.Strikes)
-		if n == h.cfg.Strikes {
-			h.events.Eventf(pod, corev1.EventTypeWarning, "DeadMount", "Volume %s: %s, %d checks in a row",
-				filepath.Base(v.dir), reason, h.cfg.Strikes)
-		}
-		if n >= h.cfg.Strikes {
-			due[pod.UID] = append(due[pod.UID], v)
+		heal, again := h.fail(pod, v.target, filepath.Base(v.dir), reason)
+		recheck = recheck || again
+		if heal {
+			d := due.of(pod)
+			d.dead = append(d.dead, v)
+			d.keys = append(d.keys, v.target)
 		}
 	}
-	for target := range h.strikes {
-		if !seen[target] {
-			delete(h.strikes, target)
+	if h.cfg.CheckContainers {
+		// A dead publish path leaves the copies in the containers dead as well, which
+		// the heal of the path takes care of.
+		for _, c := range h.containerCopies(ctx, healthy) {
+			key := copyKey(c.volume.target, c.id)
+			if c.unknown {
+				// The strikes of a copy that cannot be checked stay as they are.
+				for k := range h.strikes {
+					if strings.HasPrefix(k, key) {
+						seen[k] = true
+					}
+				}
+				continue
+			}
+			seen[key] = true
+			if c.reason == "" {
+				delete(h.strikes, key)
+				continue
+			}
+			heal, again := h.fail(c.pod, key, filepath.Base(c.volume.dir)+" in container "+c.container, c.reason)
+			recheck = recheck || again
+			if heal {
+				d := due.of(c.pod)
+				d.containers.add(c.container, c.podVolume, c.volume.target)
+				d.copyKeys = append(d.copyKeys, key)
+			}
+		}
+		maps.DeleteFunc(h.volumeNames, func(target, _ string) bool { return !seen[target] })
+	}
+	for key := range h.strikes {
+		if !seen[key] {
+			delete(h.strikes, key)
 		}
 	}
 	for uid := range h.failed {
-		if due[uid] == nil {
+		if d := due[uid]; d == nil || len(d.dead) == 0 {
 			delete(h.failed, uid)
 		}
 	}
-	for uid, vols := range due {
-		if pod := h.pod(uid); pod != nil && !h.heal(ctx, pod, vols) {
+	for uid, d := range due {
+		healed := true
+		if pod := h.pod(uid); pod != nil {
+			healed = h.heal(ctx, pod, d)
+		}
+		// The tiers ran for the containers even if the remount is tried again.
+		for _, key := range d.copyKeys {
+			delete(h.strikes, key)
+		}
+		if !healed {
 			// The strikes stay, so the next check heals again.
 			continue
 		}
 		delete(h.failed, uid)
-		for _, v := range vols {
-			delete(h.strikes, v.target)
+		for _, key := range d.keys {
+			delete(h.strikes, key)
 		}
 	}
 	return recheck
@@ -425,47 +509,89 @@ func deadReason(pod *corev1.Pod, mounted bool, err error) string {
 }
 
 // heal reports false when the remount failed with attempts left, for the next
-// check to heal again.
-func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, vols []volume) bool {
+// check to heal again. Only the dead volumes are remounted through the driver;
+// the tiers then act on each container for the volumes that are dead in it. The
+// volumes dead in some containers only need no remount, so the tiers act for them
+// whatever becomes of the remount.
+func (h *Healer) heal(ctx context.Context, pod *corev1.Pod, d *podDue) bool {
 	healed, retry := true, false
 	from, why := Tier(0), ""
 	if pod.DeletionTimestamp != nil {
 		from, why = TierDelete, "it is stuck terminating on a dead mount"
 	}
-	// Pod volume names to their targets, once remounted.
-	var podVolumes map[string]string
+	// The volumes that are dead for each container, once remounted, until the
+	// tiers acted for them.
+	dead := containerVolumes{}
+	for name, vols := range d.containers {
+		for podVolume, target := range vols {
+			dead.add(name, podVolume, target)
+		}
+	}
+	remounted := false
 	var remountErr error
 	h.escalate(pod, from, why, func(t Tier, why string) error {
 		if t == TierDelete {
 			return h.deletePod(ctx, pod, why)
 		}
-		if podVolumes == nil && remountErr == nil {
-			podVolumes, remountErr = h.remountAll(ctx, pod, vols)
+		if !remounted {
+			remounted = true
+			var podVolumes map[string]string
+			podVolumes, remountErr = h.remountAll(ctx, pod, d.dead)
 			if remountErr != nil {
 				retry, remountErr = h.remountFailed(pod, remountErr)
+			} else {
+				for name, vols := range mountedBy(pod, podVolumes) {
+					for podVolume, target := range vols {
+						dead.add(name, podVolume, target)
+					}
+				}
 			}
+		}
+		if remountErr != nil {
+			// Every tier before delete needs the remount for its volumes; it is not
+			// tried twice. A pod that is deleted anyway takes the containers along.
+			if to, _ := h.next(pod, TierDelete); len(dead) == 0 || to == TierDelete {
+				return remountErr
+			}
+		}
+		if len(dead) > 0 {
+			if err := h.actOn(ctx, pod, t, dead, d.containers); err != nil {
+				return err
+			}
+			dead = nil
 		}
 		if retry {
 			healed = false
-			return nil
 		}
-		if remountErr != nil {
-			// Every tier before delete needs the remount; it is not tried twice.
-			return remountErr
-		}
-		if t == TierLive {
-			return h.live(ctx, pod, podVolumes)
-		}
-		var names []string
-		for _, c := range containersUsing(pod, podVolumes) {
-			names = append(names, c.Name)
-		}
-		if err := h.restartContainers(ctx, pod, names); err != nil {
-			return fmt.Errorf("restarting its containers: %w", err)
-		}
-		return nil
+		return remountErr
 	})
 	return healed
+}
+
+// actOn runs tier t for the volumes that are dead in each container. The ones in
+// copies are dead in the container alone, so kubelet still holds the subPath
+// binds it made of them, which a restart would reuse.
+func (h *Healer) actOn(ctx context.Context, pod *corev1.Pod, t Tier, dead, copies containerVolumes) error {
+	for name, vols := range copies {
+		for _, target := range vols {
+			if err := h.detachSubpaths(pod, filepath.Base(filepath.Dir(target)), name); err != nil {
+				return err
+			}
+		}
+	}
+	if t == TierLive {
+		return h.live(ctx, pod, dead)
+	}
+	var names []string
+	for _, c := range longRunning(pod) {
+		if len(dead[c.Name]) > 0 {
+			names = append(names, c.Name)
+		}
+	}
+	if err := h.restartContainers(ctx, pod, names); err != nil {
+		return fmt.Errorf("restarting its containers: %w", err)
+	}
+	return nil
 }
 
 // remountFailed counts a failed remount of pod and reports whether attempts
