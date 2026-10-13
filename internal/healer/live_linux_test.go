@@ -48,6 +48,10 @@ func runChild(path string) error {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return err
 	}
+	// A container has a procfs of its own, without the threads of the healer.
+	if err := unix.Mount("tmpfs", "/proc", "tmpfs", 0, ""); err != nil {
+		return err
+	}
 	if err := unix.Mount("tmpfs", path, "tmpfs", 0, ""); err != nil {
 		return err
 	}

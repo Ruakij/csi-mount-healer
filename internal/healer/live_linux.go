@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -116,8 +117,19 @@ func swapMounts(pid int, mounts []liveMount, sources map[string]liveMount, hostN
 		}
 	}
 
+	// Opened here: /proc in the namespace is the procfs of the container, which
+	// lacks the healer's threads. The file shows the mounts at the time of reading.
+	f, err := os.Open(fmt.Sprintf("/proc/%d/mountinfo", pid))
+	if err != nil {
+		return 0, nil, err
+	}
+	defer f.Close()
 	return ns, dead, inMountNS(fmt.Sprintf("/proc/%d/ns/mnt", pid), ns, func() error {
-		now, err := readMountinfo("/proc/thread-self")
+		b, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		now, err := parseMountinfo(b)
 		if err != nil {
 			return err
 		}
@@ -309,6 +321,10 @@ func readMountinfo(proc string) ([]mountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseMountinfo(b)
+}
+
+func parseMountinfo(b []byte) ([]mountInfo, error) {
 	var infos []mountInfo
 	for line := range strings.Lines(string(b)) {
 		f := strings.Fields(line)
