@@ -7,6 +7,36 @@ entries:
       artifacthub.io/operator: "false"
       artifacthub.io/prerelease: "false"
     apiVersion: v2
+    appVersion: 0.5.1
+    created: "2026-10-13T17:21:35.617336254Z"
+    description: Remounts dead CSI volumes of running pods through their CSI driver,
+      and keeps pods from writing to the node disk while a mount is missing
+    digest: d90a2c86b5bf448136e8ab278f0dbb61127d34da133dc234818aca4cd41475f0
+    home: https://github.com/Ruakij/csi-mount-healer
+    keywords:
+    - csi
+    - storage
+    - fuse
+    - mount
+    - remount
+    - self-healing
+    kubeVersion: '>=1.26.0-0'
+    maintainers:
+    - name: Ruakij
+      url: https://github.com/Ruakij
+    name: csi-mount-healer
+    sources:
+    - https://github.com/Ruakij/csi-mount-healer
+    type: application
+    urls:
+    - https://github.com/Ruakij/csi-mount-healer/releases/download/v0.5.1/csi-mount-healer-0.5.1.tgz
+    version: 0.5.1
+  - annotations:
+      artifacthub.io/category: storage
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/operator: "false"
+      artifacthub.io/prerelease: "false"
+    apiVersion: v2
     appVersion: 0.5.0
     created: "2026-10-11T13:13:48.387658229Z"
     description: Remounts dead CSI volumes of running pods through their CSI driver,
@@ -241,4 +271,4 @@ entries:
     urls:
     - https://github.com/Ruakij/csi-mount-healer/releases/download/v0.2.1/csi-mount-healer-0.2.1.tgz
     version: 0.2.1
-generated: "2026-10-11T13:13:48.386845379Z"
+generated: "2026-10-13T17:21:35.616799391Z"
