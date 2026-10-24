@@ -66,39 +66,61 @@ func detach(path string) error {
 	}
 }
 
-// setImmutable sets or clears FS_IMMUTABLE_FL on the directory underneath
+// changeImmutable sets or clears FS_IMMUTABLE_FL on the directory underneath
 // whatever is mounted on path. A non-recursive clone of the parent mount shows
 // that directory without the mounts on top, and never touches a hung mount.
-// A missing path is not an error: there is nothing left to guard.
-func setImmutable(path string, on bool) error {
+// A missing path is not an error: there is nothing left to guard. changed tells
+// whether the flag was different before.
+func changeImmutable(path string, on bool) (changed bool, err error) {
 	tree, err := unix.OpenTree(unix.AT_FDCWD, filepath.Dir(path), unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC)
 	if errors.Is(err, unix.ENOENT) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer unix.Close(tree)
 	fd, err := unix.Openat(tree, filepath.Base(path), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if errors.Is(err, unix.ENOENT) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer unix.Close(fd)
 	flags, err := unix.IoctlGetUint32(fd, unix.FS_IOC_GETFLAGS)
 	if err != nil {
-		return err
+		return false, err
 	}
 	want := flags &^ fsImmutableFL
 	if on {
 		want |= fsImmutableFL
 	}
 	if want == flags {
-		return nil
+		return false, nil
 	}
-	return unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(want))
+	return true, unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(want))
+}
+
+// setImmutable is changeImmutable without the report.
+func setImmutable(path string, on bool) error {
+	_, err := changeImmutable(path, on)
+	return err
+}
+
+// mountPoints lists every mount point of the mount table, read without touching
+// any mounted filesystem, so a hung mount cannot block it.
+func mountPoints() (map[string]bool, error) {
+	// thread-self for the same reason as in stagingBinds.
+	infos, err := readMountinfo("/proc/thread-self")
+	if err != nil {
+		return nil, err
+	}
+	points := make(map[string]bool, len(infos))
+	for _, m := range infos {
+		points[m.point] = true
+	}
+	return points, nil
 }
 
 // stagingBinds lists the mount points whose top mount is a bind of a bare

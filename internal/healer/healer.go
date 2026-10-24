@@ -79,6 +79,9 @@ type Config struct {
 	// name. Nil or empty picks every volume.
 	Selector   labels.Selector
 	KubeClient kubernetes.Interface
+	// MetricsAddr is the address to serve the counters on, in the Prometheus text
+	// format; empty serves nothing.
+	MetricsAddr string
 }
 
 const uidIndex = "uid"
@@ -98,9 +101,20 @@ type Healer struct {
 	// volumeNames are the pod volume names of the volume directories, by target.
 	volumeNames map[string]string
 	stale       func(*swap) (int, []string, error)
+	// changeGuard sets or clears the guard on a directory and reports whether the
+	// flag changed; mountPoints lists the mount points of the node.
+	changeGuard func(path string, on bool) (changed bool, err error)
+	mountPoints func() (map[string]bool, error)
+	// readySandboxes lists the UIDs of the pods the runtime has a ready sandbox for.
+	readySandboxes func(ctx context.Context) (map[types.UID]bool, error)
+	metrics        metrics
 	// mu serialises changes to mounts and guard flags, so a sweep never guards or
 	// releases a volume halfway through a remount.
 	mu sync.Mutex
+	// unmounted are the publish targets a remount tore down and could not mount
+	// again, which stay guarded until a remount succeeds or the pod stops. Guarded
+	// by mu.
+	unmounted map[string]bool
 }
 
 func New(cfg Config) (*Healer, error) {
@@ -126,8 +140,10 @@ func New(cfg Config) (*Healer, error) {
 	}
 	h := &Healer{
 		cfg: cfg, prober: newProber(cfg.StatTimeout), strikes: map[string]strike{}, failed: map[types.UID]int{},
-		pids: map[string]int{}, volumeNames: map[string]string{},
+		pids: map[string]int{}, volumeNames: map[string]string{}, unmounted: map[string]bool{},
+		changeGuard: changeImmutable, mountPoints: mountPoints,
 	}
+	h.readySandboxes = h.listReadySandboxes
 	h.stale = func(s *swap) (int, []string, error) { return staleHandles(s.pid, s.ns, s.dead, cfg.StatTimeout) }
 	return h, nil
 }
@@ -149,7 +165,7 @@ func (h *Healer) Run(ctx context.Context) error {
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		UpdateFunc: func(old, obj any) {
 			if pod := obj.(*corev1.Pod); !active(pod) || started(pod) != started(old.(*corev1.Pod)) {
-				h.sweep(string(pod.UID))
+				h.sweep(ctx, string(pod.UID))
 			}
 		},
 		DeleteFunc: func(obj any) {
@@ -157,7 +173,7 @@ func (h *Healer) Run(ctx context.Context) error {
 				obj = tomb.Obj
 			}
 			if pod, ok := obj.(*corev1.Pod); ok {
-				h.sweep(string(pod.UID))
+				h.sweep(ctx, string(pod.UID))
 			}
 		},
 	}); err != nil {
@@ -170,6 +186,11 @@ func (h *Healer) Run(ctx context.Context) error {
 	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: h.cfg.KubeClient.CoreV1().Events("")})
 	defer broadcaster.Shutdown()
 	h.events = broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "csi-mount-healer", Host: h.cfg.NodeName})
+	if h.cfg.MetricsAddr != "" {
+		if err := h.metrics.serve(ctx, h.cfg.MetricsAddr); err != nil {
+			return err
+		}
+	}
 	factory.Start(ctx.Done())
 	defer factory.Shutdown()
 	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
@@ -179,14 +200,15 @@ func (h *Healer) Run(ctx context.Context) error {
 		h.cfg.NodeName, h.cfg.Interval, h.cfg.Strikes, h.cfg.Tiers, h.cfg.LiveTimeout, h.cfg.RemountAttempts, h.cfg.DriverDownAttempts, h.cfg.Guard, h.cfg.GuardStage, h.cfg.CheckContainers, h.cfg.Selector)
 
 	// Also clears what a previous run in another mode left behind.
-	h.sweep("*")
+	h.sweep(ctx, "*")
 
 	// A mount that appears or disappears is checked at once rather than at the
 	// next tick.
 	every(ctx, h.cfg.Interval, settle, watchMounts(ctx), func() bool {
-		// Retries guards that failed to set on a pod update.
-		if h.cfg.Guard == GuardAlways || h.cfg.GuardStage {
-			h.sweep("*")
+		// Retries guards that failed to set on a pod update, and guards the
+		// targets of running pods that lost their mount.
+		if h.cfg.Guard != GuardOff || h.cfg.GuardStage {
+			h.sweep(ctx, "*")
 		}
 		return h.scan(ctx)
 	})
@@ -194,12 +216,17 @@ func (h *Healer) Run(ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, v := range h.volumes("*") {
-		if err := setImmutable(v.target, false); err != nil {
+		if err := h.setGuard(v.target, false); err != nil {
 			klog.Warningf("releasing guard on %s: %v", v.target, err)
 		}
 	}
 	h.guardStages(false)
 	return nil
+}
+
+func (h *Healer) setGuard(path string, on bool) error {
+	_, err := h.changeGuard(path, on)
+	return err
 }
 
 func indexByUID(obj any) ([]string, error) {
@@ -333,19 +360,112 @@ func (h *Healer) selected(pod *corev1.Pod, v volume) bool {
 // sweep guards the mounts of running pods and releases every other one, for the
 // pod with the given UID or every pod for "*". Each step is idempotent, so it
 // simply converges on what the pods look like right now.
-func (h *Healer) sweep(podUID string) {
+//
+// The target of a running pod that is not a mount point, or that a remount tore
+// down and could not mount again, is guarded in every mode but off: a container
+// started on it would write to the node disk. A target that is missing is made
+// first. Finding one unguarded is counted.
+//
+// kubelet unmounts the volumes of a finished pod before its status reaches the
+// informer, so a target without a mount is only taken for lost while the runtime
+// has a ready sandbox for the pod: kubelet stops the sandbox before it tears the
+// volumes down, and a pod whose containers crash keeps it. Without one, the
+// guard of the target stays as it is, as the sandbox may only be recreated.
+// Sandboxes that cannot be listed count as ready, as a guard on a target with
+// nothing mounted on it is worth more than the chance of holding up a teardown.
+// They are listed once per sweep, and only when a target needs it, so the lock
+// is held for the timeout at most once.
+func (h *Healer) sweep(ctx context.Context, podUID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	var points map[string]bool
+	if h.cfg.Guard != GuardOff {
+		var err error
+		if points, err = h.mountPoints(); err != nil {
+			klog.Warningf("reading mounts, not looking for unmounted targets: %v", err)
+			points = nil
+		}
+	}
+	var ready map[types.UID]bool
+	listedSandboxes := false
+	sandbox := func(uid types.UID) (isReady, known bool) {
+		if !listedSandboxes {
+			listedSandboxes = true
+			sctx, cancel := context.WithTimeout(ctx, sandboxTimeout)
+			defer cancel()
+			var err error
+			if ready, err = h.readySandboxes(sctx); err != nil {
+				klog.Warningf("listing the pod sandboxes: %v", err)
+				ready = nil
+			}
+		}
+		if ready == nil {
+			return true, false
+		}
+		return ready[uid], true
+	}
+	listed := map[string]bool{}
 	for _, v := range h.volumes(podUID) {
+		listed[v.target] = true
 		pod := h.pod(v.podUID)
-		guard := h.cfg.Guard == GuardAlways && pod != nil && h.selected(pod, v) && active(pod) && started(pod)
-		if err := setImmutable(v.target, guard); err != nil {
-			klog.Warningf("setting guard on %s to %v: %v", v.target, guard, err)
+		running := pod != nil && h.selected(pod, v) && active(pod) && started(pod)
+		mounted := points != nil && points[v.target]
+		// A mark is stale once the pod stopped, or the target got mounted after
+		// the remount gave up, as it can when a publish timed out.
+		if !running || mounted {
+			delete(h.unmounted, v.target)
+		}
+		guard := h.cfg.Guard == GuardAlways && running
+		lost := running && h.cfg.Guard != GuardOff && h.unmounted[v.target]
+		missing := lost && points != nil
+		stopped := false
+		if running && h.cfg.Guard != GuardOff && points != nil && !mounted && !lost {
+			r, known := sandbox(v.podUID)
+			lost = r
+			missing = r && known
+			stopped = !r
+		}
+		if missing {
+			if err := makeTarget(v.target); err != nil {
+				klog.Warningf("making %s: %v", v.target, err)
+			}
+		}
+		if h.cfg.Guard != GuardOff && running && !guard && !lost && (points == nil || stopped) {
+			// Nothing is known about the mounts, or the pod may be stopping, so a
+			// guard stays as it is.
+			continue
+		}
+		changed, err := h.changeGuard(v.target, guard || lost)
+		if err != nil {
+			klog.Warningf("setting guard on %s to %v: %v", v.target, guard || lost, err)
+		} else if lost && changed && !mounted {
+			h.metrics.unguarded.Add(1)
+			klog.Warningf("pod %s: %s has nothing mounted on it, a container started on it writes to the node disk; guarded it now", v.podUID, v.target)
+		}
+	}
+	if podUID == "*" {
+		for target := range h.unmounted {
+			if !listed[target] {
+				delete(h.unmounted, target)
+			}
 		}
 	}
 	if h.cfg.GuardStage || podUID == "*" {
 		h.guardStages(h.cfg.GuardStage)
 	}
+}
+
+// sandboxTimeout bounds the listing of the sandboxes in a sweep, which holds the
+// lock of the mounts.
+const sandboxTimeout = 2 * time.Second
+
+// makeTarget creates a publish target that is missing, as remount does. A path
+// is only looked at that has no mount on it, so a hung mount cannot block it.
+func makeTarget(path string) error {
+	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return os.MkdirAll(path, 0o750)
 }
 
 // guardStages guards the staging directories of the volumes running pods use
@@ -367,7 +487,7 @@ func (h *Healer) guardStages(enabled bool) {
 	}
 	stages, _ := filepath.Glob(filepath.Join(h.cfg.KubeletRoot, "plugins/kubernetes.io/csi/*/*/globalmount"))
 	for _, s := range stages {
-		if err := setImmutable(s, want[s]); err != nil {
+		if err := h.setGuard(s, want[s]); err != nil {
 			klog.Warningf("setting guard on %s to %v: %v", s, want[s], err)
 		}
 	}

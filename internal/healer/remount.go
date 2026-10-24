@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
@@ -29,7 +30,16 @@ const csiTimeout = 2 * time.Minute
 
 // remount mounts a dead volume again through its CSI driver, the way kubelet
 // mounted it, and returns the name of the pod volume.
-func (h *Healer) remount(ctx context.Context, pod *corev1.Pod, v volume) (string, error) {
+//
+// Once the target is torn down it stays guarded and marked unmounted until a
+// remount succeeds, so a failure leaves no writable directory behind for a
+// container to start on.
+func (h *Healer) remount(ctx context.Context, pod *corev1.Pod, v volume) (name string, err error) {
+	defer func() {
+		if err != nil {
+			h.metrics.remountFailed.Add(1)
+		}
+	}()
 	data, err := v.data()
 	if err != nil {
 		return "", err
@@ -60,15 +70,36 @@ func (h *Healer) remount(ctx context.Context, pod *corev1.Pod, v volume) (string
 	}
 
 	// Drivers remove the target directory on unpublish, which the guard forbids.
-	if err := setImmutable(v.target, false); err != nil {
+	// The directory is guarded again as soon as the driver is done with it, even
+	// if the rest fails.
+	if err := h.setGuard(v.target, false); err != nil {
 		return "", err
 	}
+	torn := false
+	defer func() {
+		if torn && err != nil {
+			h.unmounted[v.target] = true
+			if h.cfg.Guard != GuardOff {
+				if gerr := h.setGuard(v.target, true); gerr != nil {
+					klog.Errorf("guarding %s after the failed remount: %v", v.target, gerr)
+				}
+			}
+			klog.Errorf("remount of %s failed, nothing is mounted on it (guard %s), healing again at the next check: %v", v.target, h.cfg.Guard, err)
+		}
+	}()
 	cctx, cancel := context.WithTimeout(ctx, csiTimeout)
 	defer cancel()
-	if _, err := node.NodeUnpublishVolume(cctx, &csi.NodeUnpublishVolumeRequest{
+	_, uerr := node.NodeUnpublishVolume(cctx, &csi.NodeUnpublishVolumeRequest{
 		VolumeId: data.VolumeHandle, TargetPath: v.target,
-	}); err != nil {
-		klog.Warningf("NodeUnpublishVolume %s: %v, detaching it instead", v.target, err)
+	})
+	torn = true
+	if uerr != nil {
+		klog.Warningf("NodeUnpublishVolume %s: %v, detaching it instead", v.target, uerr)
+	}
+	if h.cfg.Guard != GuardOff {
+		if err := h.setGuard(v.target, true); err != nil {
+			klog.Warningf("guarding %s: %v", v.target, err)
+		}
 	}
 	if err := detach(v.target); err != nil {
 		return "", err
@@ -77,7 +108,7 @@ func (h *Healer) remount(ctx context.Context, pod *corev1.Pod, v volume) (string
 		return "", err
 	}
 	if h.cfg.Guard != GuardOff {
-		if err := setImmutable(v.target, true); err != nil {
+		if err := h.setGuard(v.target, true); err != nil {
 			return "", err
 		}
 	}
@@ -89,13 +120,15 @@ func (h *Healer) remount(ctx context.Context, pod *corev1.Pod, v volume) (string
 	if err := h.verify(v.target); err != nil {
 		return "", err
 	}
+	torn = false
 
 	if err := h.detachSubpaths(pod, filepath.Base(v.dir), "*"); err != nil {
 		return "", err
 	}
 
+	delete(h.unmounted, v.target)
 	if h.cfg.Guard == GuardRemount {
-		if err := setImmutable(v.target, false); err != nil {
+		if err := h.setGuard(v.target, false); err != nil {
 			return "", err
 		}
 	}
@@ -127,7 +160,7 @@ func (h *Healer) restage(ctx context.Context, node csi.NodeClient, req *csi.Node
 	}
 	klog.Infof("restaging %s", path)
 	// The driver may remove and recreate the directory.
-	if err := setImmutable(path, false); err != nil {
+	if err := h.setGuard(path, false); err != nil {
 		return err
 	}
 	cctx, cancel := context.WithTimeout(ctx, csiTimeout)
@@ -150,7 +183,7 @@ func (h *Healer) restage(ctx context.Context, node csi.NodeClient, req *csi.Node
 		return err
 	}
 	if h.cfg.GuardStage {
-		return setImmutable(path, true)
+		return h.setGuard(path, true)
 	}
 	return nil
 }
@@ -389,6 +422,26 @@ func runningContainers(ctx context.Context, rt runtimeapi.RuntimeServiceClient, 
 		running[c.GetLabels()[containerNameLabel]] = c
 	}
 	return running, nil
+}
+
+// listReadySandboxes lists the UIDs of the pods the runtime has a ready sandbox for.
+func (h *Healer) listReadySandboxes(ctx context.Context) (map[types.UID]bool, error) {
+	conn, err := dial(h.cfg.CRIEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	resp, err := runtimeapi.NewRuntimeServiceClient(conn).ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{
+		Filter: &runtimeapi.PodSandboxFilter{State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing sandboxes: %w", err)
+	}
+	ready := map[types.UID]bool{}
+	for _, sb := range resp.GetItems() {
+		ready[types.UID(sb.GetLabels()[podUIDLabel])] = true
+	}
+	return ready, nil
 }
 
 // restartContainers stops the named containers that are running, each of which

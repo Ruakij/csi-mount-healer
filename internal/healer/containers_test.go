@@ -31,6 +31,7 @@ type fakeCRI struct {
 	runtimeapi.UnimplementedRuntimeServiceServer
 	mu         sync.Mutex
 	containers []*runtimeapi.Container
+	sandboxes  []*runtimeapi.PodSandbox
 	pids       map[string]int
 	listErr    error
 	statusErr  map[string]error
@@ -54,6 +55,28 @@ func (f *fakeCRI) ListContainers(_ context.Context, req *runtimeapi.ListContaine
 		}
 		if match {
 			resp.Containers = append(resp.Containers, c)
+		}
+	}
+	return resp, nil
+}
+
+func (f *fakeCRI) ListPodSandbox(_ context.Context, req *runtimeapi.ListPodSandboxRequest) (*runtimeapi.ListPodSandboxResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	resp := &runtimeapi.ListPodSandboxResponse{}
+	for _, sb := range f.sandboxes {
+		match := true
+		if st := req.GetFilter().GetState(); st != nil {
+			match = sb.GetState() == st.GetState()
+		}
+		for k, v := range req.GetFilter().GetLabelSelector() {
+			match = match && sb.GetLabels()[k] == v
+		}
+		if match {
+			resp.Items = append(resp.Items, sb)
 		}
 	}
 	return resp, nil

@@ -19,7 +19,9 @@ func detach(string) error { return errUnsupported }
 
 func stagingBinds() (map[string]bool, error) { return nil, errUnsupported }
 
-func setImmutable(string, bool) error { return errUnsupported }
+func changeImmutable(string, bool) (bool, error) { return false, errUnsupported }
+
+func mountPoints() (map[string]bool, error) { return nil, errUnsupported }
 
 func DropPrivileges() error { return errUnsupported }
 

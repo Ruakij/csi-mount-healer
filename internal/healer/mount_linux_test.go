@@ -138,6 +138,8 @@ type fakeDriver struct {
 	registerapi.UnimplementedRegistrationServer
 	name, endpoint string
 	published      *csi.NodePublishVolumeRequest
+	// publishErr fails the publish when set.
+	publishErr error
 }
 
 func (d *fakeDriver) GetInfo(context.Context, *registerapi.InfoRequest) (*registerapi.PluginInfo, error) {
@@ -160,6 +162,9 @@ func (d *fakeDriver) NodeUnstageVolume(_ context.Context, req *csi.NodeUnstageVo
 
 func (d *fakeDriver) NodePublishVolume(_ context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	d.published = req
+	if d.publishErr != nil {
+		return nil, d.publishErr
+	}
 	if err := os.MkdirAll(req.TargetPath, 0o750); err != nil {
 		return nil, err
 	}
@@ -186,7 +191,17 @@ func serve(t *testing.T, sock string, register func(*grpc.Server)) {
 	t.Cleanup(s.Stop)
 }
 
-func TestRemount(t *testing.T) {
+// remountTest is a publish whose mount is gone, with a subPath bind into it and
+// a fake driver to mount it again.
+type remountTest struct {
+	h                *Healer
+	d                *fakeDriver
+	pod              *corev1.Pod
+	v                volume
+	staging, subpath string
+}
+
+func newRemountTest(t *testing.T, guard GuardMode) *remountTest {
 	root := t.TempDir()
 	pod := testPod()
 	pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
@@ -223,10 +238,16 @@ func TestRemount(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "d"},
 		Spec:       storagev1.CSIDriverSpec{AttachRequired: ptr(false)},
 	})
-	h, err := New(Config{NodeName: "n", KubeletRoot: root, Strikes: 1, StatTimeout: 5 * time.Second, Guard: GuardAlways, GuardStage: true, KubeClient: client})
+	h, err := New(Config{NodeName: "n", KubeletRoot: root, Strikes: 1, StatTimeout: 5 * time.Second, Guard: guard, GuardStage: true, KubeClient: client})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return &remountTest{h: h, d: d, pod: pod, v: v, staging: staging, subpath: subpath}
+}
+
+func TestRemount(t *testing.T) {
+	r := newRemountTest(t, GuardAlways)
+	h, d, pod, v, staging, subpath := r.h, r.d, r.pod, r.v, r.staging, r.subpath
 
 	name, err := h.remount(context.Background(), pod, v)
 	if err != nil {
@@ -265,11 +286,98 @@ func TestRemount(t *testing.T) {
 	if err := h.pods.Add(pod); err != nil {
 		t.Fatal(err)
 	}
-	h.sweep(string(pod.UID))
+	h.sweep(context.Background(), string(pod.UID))
 	for _, p := range []string{v.target, staging} {
 		if err := os.WriteFile(filepath.Join(p, "x"), nil, 0o644); err != nil {
 			t.Errorf("write underneath %s after the pod stopped: %v", p, err)
 		}
+	}
+}
+
+// A publish that fails leaves the torn down target guarded, marked for the
+// sweep to keep guarded, and counted. The next remount publishes onto the guarded
+// directory, which an immutable directory allows as a mount point.
+func TestRemountPublishFails(t *testing.T) {
+	for _, guard := range []GuardMode{GuardAlways, GuardRemount} {
+		t.Run(string(guard), func(t *testing.T) {
+			r := newRemountTest(t, guard)
+			h, v := r.h, r.v
+			r.pod.Status = runningPod().Status
+			h.pods = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{uidIndex: indexByUID})
+			if err := h.pods.Add(r.pod); err != nil {
+				t.Fatal(err)
+			}
+			writable := func() error {
+				err := os.WriteFile(filepath.Join(v.target, "x"), nil, 0o644)
+				_ = os.Remove(filepath.Join(v.target, "x"))
+				return err
+			}
+
+			r.d.publishErr = errors.New("driver broke")
+			if _, err := h.remount(context.Background(), r.pod, v); err == nil {
+				t.Fatal("remount succeeded though the publish failed")
+			}
+			if mustStat(t, v.target) {
+				t.Fatal("target mounted after the failed publish")
+			}
+			if err := writable(); !errors.Is(err, unix.EPERM) {
+				t.Errorf("write to the target after the failed publish: got %v, want EPERM", err)
+			}
+			if !h.unmounted[v.target] {
+				t.Error("target not marked unmounted")
+			}
+			if got := h.metrics.remountFailed.Load(); got != 1 {
+				t.Errorf("failed remounts = %d, want 1", got)
+			}
+
+			// The sweep keeps it guarded, whatever the mode, and finds nothing unguarded.
+			h.sweep(context.Background(), "*")
+			if err := writable(); !errors.Is(err, unix.EPERM) {
+				t.Errorf("write to the target after a sweep: got %v, want EPERM", err)
+			}
+			if got := h.metrics.unguarded.Load(); got != 0 {
+				t.Errorf("unguarded targets found = %d, want 0", got)
+			}
+
+			// A guard lost since is set again and counted.
+			if err := setImmutable(v.target, false); err != nil {
+				t.Fatal(err)
+			}
+			h.sweep(context.Background(), "*")
+			if err := writable(); !errors.Is(err, unix.EPERM) {
+				t.Errorf("write to the target after the guard was lost: got %v, want EPERM", err)
+			}
+			if got := h.metrics.unguarded.Load(); got != 1 {
+				t.Errorf("unguarded targets found = %d, want 1", got)
+			}
+
+			// A running pod's target with nothing mounted is guarded without any failed remount.
+			delete(h.unmounted, v.target)
+			if err := setImmutable(v.target, false); err != nil {
+				t.Fatal(err)
+			}
+			h.sweep(context.Background(), "*")
+			if err := writable(); !errors.Is(err, unix.EPERM) {
+				t.Errorf("write to a target of a running pod with nothing mounted: got %v, want EPERM", err)
+			}
+			if got := h.metrics.unguarded.Load(); got != 2 {
+				t.Errorf("unguarded targets found = %d, want 2", got)
+			}
+
+			r.d.publishErr = nil
+			if _, err := h.remount(context.Background(), r.pod, v); err != nil {
+				t.Fatal(err)
+			}
+			if !mustStat(t, v.target) || h.unmounted[v.target] {
+				t.Error("target not mounted or still marked unmounted after the retry")
+			}
+			if err := detach(v.target); err != nil {
+				t.Fatal(err)
+			}
+			if err := writable(); errors.Is(err, unix.EPERM) != (guard == GuardAlways) {
+				t.Errorf("write underneath the remounted volume in guard %s: %v", guard, err)
+			}
+		})
 	}
 }
 

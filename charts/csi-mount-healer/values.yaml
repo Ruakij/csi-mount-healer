@@ -15,6 +15,7 @@ image:
 #   guard: always
 #   guard-stage: false
 #   check-containers: true
+#   metrics-addr: ":9102"
 #   selector: "driver in (csi.moosefs.com),!csi-mount-healer/skip"
 #   v: 2
 config: {}

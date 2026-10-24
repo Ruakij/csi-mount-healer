@@ -1,4 +1,5 @@
 {{- $kubeletRoot := trimSuffix "/" .Values.kubeletRootDir -}}
+{{- $metricsPort := regexFind "[0-9]+$" (index .Values.config "metrics-addr" | default "" | toString) -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -53,6 +54,12 @@ spec:
             {{- range $name, $value := .Values.config }}
             - {{ printf "-%s=%v" $name $value | quote }}
             {{- end }}
+          {{- if $metricsPort }}
+          ports:
+            - name: metrics
+              containerPort: {{ $metricsPort | int }}
+              protocol: TCP
+          {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:

@@ -198,11 +198,52 @@ driver that takes longer, raise `-strikes` or `-interval`.
 
 | Flag | Directory made immutable | Advantages | Disadvantages |
 |---|---|---|---|
-| `-guard=always` (default) | underneath the publish target of every started pod | a container started on a missing mount fails on its first write | none known; released as soon as the pod stops, so kubelet can remove the directory |
-| `-guard=remount` | underneath the publish target, while it is remounted | nothing is left immutable between heals | a mount that dies between checks exposes a writable directory |
+| `-guard=always` (default) | underneath the publish target of every started pod | a container started on a missing mount fails on its first write | released as soon as the pod stops, so kubelet can remove the directory; breaks drivers that publish without mounting, see below |
+| `-guard=remount` | underneath the publish target, while it is remounted, and while a running pod has nothing mounted on it | a mounted target is left unguarded | a mount that dies is guarded only when the mount table changes or at the next check, so a container can start on it before; breaks drivers that publish without mounting, see below |
 | `-guard-stage` (off by default) | underneath the staging mount of every volume a started pod uses | a pod published while the staging mount is gone cannot write to the node disk | breaks drivers that remove the staging directory while pods use the volume, e.g. to recover it |
 
+A guarded mount that is missing fails every write with `EPERM`. The sweep that
+runs before each check also guards, in every mode but `off`, the publish target
+of a running pod with nothing mounted on it, and one a remount tore down and
+could not mount again, until a remount succeeds or the pod stops. A remount
+guards the directory again as soon as the driver has unpublished it, so a failed
+publish leaves the target guarded. Finding such a target unguarded logs a warning
+and is counted in [metrics](#metrics). A target that is missing is created
+first, with mode `0750`.
+
+kubelet unmounts the volumes of a finished pod before the pod status reaches the
+healer, so a target without a mount counts as lost only while the container
+runtime has a ready sandbox for the pod, which kubelet stops before the volumes
+are torn down and a pod with crashing containers keeps. Without one the guard of
+the target stays as it is, as the sandbox may only be recreated. Sandboxes that
+cannot be listed count as ready. A sweep lists them with one CRI call, only if a
+target has nothing mounted on it, and waits 2 seconds at most for the answer. In
+the moments between kubelet stopping the sandbox and the status reaching the
+healer a target may still be guarded, which holds up the teardown until the next
+sweep releases it.
+
+Known gaps:
+
+- `-guard=always` and `-guard=remount` leave the target unguarded during
+  `NodeUnpublishVolume` of a remount, as drivers remove the directory there.
+- `-guard=always` and `-guard=remount` guard the target of a driver that
+  publishes without mounting, e.g. by populating a directory, as nothing is
+  mounted on it; the driver cannot update the contents then. Such drivers need
+  `-guard=off`, or a selector that leaves them out.
+
 Every guard is released when the healer shuts down.
+
+## Metrics
+
+With `-metrics-addr`, counters are served in the Prometheus text format at
+`/metrics`. The Helm chart declares the port as the container port `metrics` of
+the pods when `config.metrics-addr` is set; any pod scrape config (annotations,
+`PodMonitor`, `VMPodScrape`) can select that port, the chart ships none.
+
+| Metric | Counts |
+|---|---|
+| `csi_mount_healer_unguarded_unmounted_targets_total` | publish targets of running pods found with nothing mounted on them and no guard, which a container could start on and write to the node disk |
+| `csi_mount_healer_remount_failures_total` | remounts through a CSI driver that failed, whatever the reason |
 
 ## Configuration
 
@@ -222,6 +263,7 @@ Every guard is released when the healer shuts down.
 | `-guard-stage` | `GUARD_STAGE` | `false` | also [guard](#guards) staging directories |
 | `-check-containers` | `CHECK_CONTAINERS` | `true` | also check the copy of each volume in every container that mounts it, which finds copies dead while the path on the node is healthy; costs a CRI listing and a probe per volume mount of every container on each check |
 | `-selector` | `SELECTOR` | | label selector picking the volumes to check, heal and guard; empty picks all |
+| `-metrics-addr` | `METRICS_ADDR` | | address to serve [metrics](#metrics) on, e.g. `:9102`; empty serves none |
 | `-cri-endpoint` | `CRI_ENDPOINT` | `unix:///run/containerd/`<br>`containerd.sock` | container runtime socket |
 
 The selector has the syntax of `kubectl -l` and sees the labels of the pod plus
@@ -297,6 +339,11 @@ which have no environment variables.
     the directory without what is mounted on it and never touches a hung mount.
     A pod watch sets it when the first container of a pod starts and clears it
     when the pod terminates, since kubelet cannot remove an immutable directory.
+    An immutable directory is still a mount point, so the guard stays set while
+    the volume is published onto it. Drivers remove the target when they
+    unpublish it, so the guard is cleared for that call only and set again right
+    after, before the target is detached and made again. A remount that fails
+    keeps the target guarded and is retried at the next check.
 
 ## Development
 
