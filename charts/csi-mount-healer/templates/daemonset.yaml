@@ -26,6 +26,10 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "csi-mount-healer.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       # The live tier and check-containers find container processes by the pids
       # the CRI reports, and reach their mount namespaces and roots through /proc.
       hostPID: true
@@ -65,13 +69,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+          {{- with .Values.securityContext }}
           securityContext:
-            # Bidirectional propagation requires privileged, which grants every
-            # capability and ignores capabilities.drop; the binary drops all but
-            # CAP_SYS_ADMIN, CAP_LINUX_IMMUTABLE, CAP_DAC_READ_SEARCH,
-            # CAP_SYS_PTRACE and CAP_SYS_CHROOT itself at startup.
-            privileged: true
-            readOnlyRootFilesystem: true
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

@@ -34,6 +34,24 @@ serviceAccount:
   create: true
   name: ""
 
+# Not hardened like a plain workload, each deviation has a reason:
+# - runAsNonRoot is unset: the healer unmounts and remounts under the kubelet
+#   directory and sets the immutable attribute, which needs root.
+# - privileged is true: Bidirectional mount propagation requires it. It grants
+#   every capability and ignores capabilities.drop, and the API server rejects
+#   allowPrivilegeEscalation: false together with it, so neither is set. The
+#   binary drops all but CAP_SYS_ADMIN, CAP_LINUX_IMMUTABLE,
+#   CAP_DAC_READ_SEARCH, CAP_SYS_PTRACE and CAP_SYS_CHROOT itself at startup.
+# - The service account token stays mounted: the healer lists pods and creates
+#   events through the Kubernetes API.
+# The root filesystem is read-only; the healer writes nothing to it.
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  privileged: true
+  readOnlyRootFilesystem: true
+
 resources:
   requests:
     cpu: 10m
