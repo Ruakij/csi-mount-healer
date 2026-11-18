@@ -3,7 +3,7 @@ module github.com/Ruakij/csi-mount-healer
 go 1.27.4
 
 require (
-	github.com/container-storage-interface/spec v1.13.0
+	github.com/container-storage-interface/spec v1.14.0
 	golang.org/x/sys v0.50.0
 	google.golang.org/grpc v1.85.0
 	k8s.io/api v0.37.2
